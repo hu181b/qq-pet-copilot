@@ -44,6 +44,7 @@ from src.progress import (
     log_history,
     save_progress,
     record_work_finish,
+    set_current_work_duration,
 )
 from src.scenario import CLICK_INTERVAL, DeviceScenario, TaskDeferred
 from scenarios.friend_care import FriendCareScenario
@@ -154,6 +155,8 @@ class FriendHireScenario(FriendCareScenario):
             log('未回到工作面板，重新归位选择框再选一次')
             self._select_job()
         work._start_work()
+        # 保存本次实际选择的时长，供结算及跨天/重启后的收尾使用。
+        set_current_work_duration(work.duration)
         log('已开始雇佣打工，等待结束...')
         if self.defer_wait:
             # 延时收尾：登记 pending（到点由调度器 finish_pending 收尾，计雇佣+打工

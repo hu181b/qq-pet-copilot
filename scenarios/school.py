@@ -5,7 +5,7 @@
 2. 出门后若正在上课/工作/冒险/被雇佣中（school_in / work_in / adventure_in / employed_in）
    -> 等待结束并退出，等完的课程/工作计入对应场景的当天次数，
       回主页面结束本轮，由执行器重新判断限制条件后再决定下一步
-3. 每 1 秒点击一次 school，直到出现 school_start 按钮；
+3. 点击明确的 study 学园入口，进入学园后等待 school_start，不能继续点击地图建筑；
    若出现毕业标志（"去找同学玩"——毕业时学校面板没有"去上课"），
    点"关闭"再点两次 back 回主页面，重新进学校选择下一阶段课程
 4. 选课：先 OCR 上半屏识别学园阶段（初级/中级学园课程顺序固定为
@@ -39,7 +39,10 @@ from src.progress import (
     save_progress,
     set_current_school,
 )
-from src.scenario import CLICK_INTERVAL, DeviceScenario, NAV_TIMEOUT
+from src.scenario import CLICK_INTERVAL, DeviceScenario
+
+# 真机后台加载学园可能超过原来 10 次轮询；保持有界等待，避免未加载就误点。
+NAV_TIMEOUT = 20
 
 # 属性点 -> 三栏选择框定位名（力量/智力/魅力 对应第一/二/三框；初级/中级学园用）
 ATTRIBUTE_COURSES = {
@@ -93,7 +96,7 @@ class SchoolScenario(DeviceScenario):
     # ---- 各阶段 ----
 
     def goto_school(self) -> str | None:
-        """主页面 -> 出门 -> 反复点学校直到出现 school_start。
+        """主页面 -> 出门 -> 点击学园入口，等待课程面板加载。
 
         出门后若正在上课/工作/冒险/被雇佣中（上次中途停止），等待结束并退出、回主页面，
         返回等完的是哪种（'school' / 'work' / 'adventure' / 'employed'）——此时不再继续进学校，
@@ -123,14 +126,16 @@ class SchoolScenario(DeviceScenario):
                     self._graduated_once = True
                     self._close_graduation()
                     return 'graduated'
-                school = self.see('school', None, source)
-                if school:
+                # 学园地图加载时开始按钮可能尚未出现；下层出门地图的 study
+                # 节点也可能残留。先辨认 academy_*，避免穿透点击和误开旧证书。
+                in_school = self.see('school_map', None, source)
+                school = None if in_school else self.see('school', None, source)
+                if school and (not clicked or attempt % 3 == 0):
                     self.click(school[0], school[1])
                     clicked = True
-                elif clicked:
-                    # 学校气泡点完消失但面板标志没识别到：已进入面板，继续选课
-                    log('前往学校: school 已消失，进入选课')
-                    return None
+                elif clicked or in_school:
+                    # 入口消失不能证明课程已经加载，必须等到明确的去上课按钮。
+                    log(f'前往学校: 等待课程面板加载 ({attempt}/{NAV_TIMEOUT})')
                 else:
                     log(f'前往学校: 未找到 school，等待重试 ({attempt}/{NAV_TIMEOUT})')
                 time.sleep(CLICK_INTERVAL)
@@ -243,6 +248,8 @@ class SchoolScenario(DeviceScenario):
         """
         if max_times is None:
             max_times = self.times_per_day
+        # 此标志只用于本轮毕业导航防循环，不把上次失败传入后续独立重试。
+        self._graduated_once = False
         today, learned, history = load_progress(PROGRESS_FILE)
         log_history(history, today)
         start_learned = learned

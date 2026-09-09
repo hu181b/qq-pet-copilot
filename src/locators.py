@@ -132,8 +132,10 @@ LOCATORS: dict[str, dict] = {
 
     # ---- 学习 ----
     'school': {
-        'xpath': ['//*[@content-desc="map_blank"]/android.widget.FrameLayout[2]/android.widget.FrameLayout[1]']
-               ,'ocr': ['宠物学园']},
+        # study 是出门地图的学园入口；map_blank 的子节点在学园内会变成
+        # 建筑/证书入口，标题“宠物学园”也仍然存在，不能用它们重复点击。
+        'xpath': ['//*[@content-desc="study"]']},
+    'school_map': {'xpath': ['//*[starts-with(@content-desc, "academy_")]']},
     'school_start': {
         'xpath': ['//*[@content-desc="去上课"]']
                ,'ocr': ['去上课']},
@@ -262,6 +264,8 @@ LOCATORS: dict[str, dict] = {
                   '/android.widget.FrameLayout[1]/android.widget.FrameLayout[5]'],
     },
     'feed': {'xpath': ['//*[@content-desc="feed"]']},
+    # 收起时节点仍存在，但高度为零/负数；调用方需校验 bounds。
+    'status_collapse': {'xpath': ['//*[@content-desc="收起"]']},
     # 一键护理按钮（content-desc 以 one_click_care 开头，后缀不固定，前缀匹配）；
     # 护理方式配置为"一键护理"时，照顾流程只点它——不读状态、不手动喂食/洗澡
     'one_click_care': {'xpath': ['//*[starts-with(@content-desc, "one_click_care")]']},
@@ -287,13 +291,12 @@ LOCATORS: dict[str, dict] = {
     'exchange_pay': {'xpath': ['//*[starts-with(@content-desc, "支付")'
                                ' and contains(@content-desc, "金币")]']},
     'feed_10': {
-        'xpath': ['//androidx.recyclerview.widget.RecyclerView'
-                  '/android.widget.FrameLayout[1]/android.widget.FrameLayout[1]'],
+        # 好友列表也是 RecyclerView，不能按第一个列表的结构定位道具。
+        'xpath': ['//*[@content-desc="饼干" or starts-with(@content-desc, "饼干，剩余")]'],
     },
     'shower': {'xpath': ['//*[@content-desc="洗澡"]']},
     'shower_10': {
-        'xpath': ['//androidx.recyclerview.widget.RecyclerView'
-                  '/android.widget.FrameLayout[1]/android.widget.FrameLayout[1]'],
+        'xpath': ['//*[@content-desc="香皂片" or starts-with(@content-desc, "香皂片，剩余")]'],
     },
 }
 

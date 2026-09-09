@@ -61,12 +61,12 @@ ITEM_ANCHOR_KEYS = {'feed_10': 'biscuit', 'shower_10': 'soap'}
 ITEM_CROP_MARGIN = 80
 
 
-def parse_panel_info(results: list[tuple[str, int, int, float]]) -> dict:
+def parse_panel_info(results: list[tuple[str, int, int, float]], scale: float = 1.0) -> dict:
     """从状态面板 OCR 结果解析 账号名称/宠物名称。
 
     面板文案没有标签：第一行是账号昵称（用户自取，任意文本），第二行是宠物名称，
     后面跟体力/清洁/心情状态。规则：按从上到下跳过状态行和纯数字行，
-    前两行有效文本依次是 账号名称/宠物名称
+    取体力行上方、同列最近两行有效文本作为 账号名称/宠物名称，排除手机状态栏
     （名称和状态在同一文本块时截掉状态部分）。
     """
     tokens = sorted(((text.replace(' ', ''), x, y) for text, x, y, _ in results),
@@ -76,6 +76,18 @@ def parse_panel_info(results: list[tuple[str, int, int, float]]) -> dict:
     # 防止把好友昵称当成账号写进状态缓存、污染按账号的进度目录
     if any('加好友' in text for text, *_ in results):
         return info
+    anchors = [(x, y) for text, x, y in tokens if '体力' in text]
+    if not anchors:
+        return info
+    ax, ay = anchors[0]
+    candidates = [(text, x, y) for text, x, y in tokens
+                  if y < ay and abs(x - ax) < STATUS_COL_TOL * scale
+                  and not any(name in text for name in STATUS_NAMES)
+                  and not re.fullmatch(r'\d+', text)]
+    # 不足两行时宁可不更新名称，避免把状态栏或其它标签写入缓存。
+    if len(candidates) < 2:
+        return info
+    tokens = candidates[-2:]
     keys = ('账号名称', '宠物名称')
     idx = 0
     for text, _, _ in tokens:
@@ -119,7 +131,7 @@ def parse_status(results: list[tuple[str, int, int, float]], scale: float = 1.0)
         if pick:
             pick.sort(key=lambda n: (n[1] - ax) ** 2 + (n[2] - ay) ** 2)
             status[name] = pick[0][0]
-    status.update(parse_panel_info(results))
+    status.update(parse_panel_info(results, scale))
     return status
 
 
@@ -488,6 +500,16 @@ class CareScenario(DeviceScenario):
         self.click(hit[0], hit[1])
         time.sleep(CLICK_INTERVAL)
 
+    def set_status_expanded(self, expanded: bool, source=None) -> None:
+        """按面板可见范围设置状态，避免已展开时再次点击反而收起。"""
+        if source is None:
+            source = self.dev.hierarchy()
+        bounds = see_bounds(self.dev, 'status_collapse', source=source)
+        # u2 有时直接省略被折叠的节点，有时保留零/负高度 bounds。
+        is_expanded = bool(bounds and bounds[2] > bounds[0] and bounds[3] > bounds[1])
+        if is_expanded != expanded:
+            self.toggle_status(source)
+
     def check_and_care(self) -> None:
         """检查一次体力/清洁，低于阈值则喂食/洗澡，最后收起状态面板。
         护理方式为"一键护理"时不读状态：主页面有一键护理按钮就点，然后直接结束。"""
@@ -496,7 +518,7 @@ class CareScenario(DeviceScenario):
             self.one_click_care()
             return
         source = self.ensure_main_page()
-        self.toggle_status(source)
+        self.set_status_expanded(True, source)
         # 状态面板展开后重新读状态；数值异步加载（刚展开可能只有账号/宠物名），
         # read_status_ready 内部重新截图重试；feed/shower 入口按钮重新抓控件树
         status = self.read_status_ready()
@@ -525,7 +547,7 @@ class CareScenario(DeviceScenario):
             source = self.dev.hierarchy()
         if cared:
             source = self.exit_care_mode(source)
-        self.toggle_status(source)
+        self.set_status_expanded(False, source)
         log('状态检查完成，已收起宠物状态')
 
 

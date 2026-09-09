@@ -1,0 +1,4 @@
+# 本机验证通过的 Windows GUI 打包依赖。
+# pip install -r requirements.txt -c build-constraints.txt
+PyQt6==6.7.1
+PyQt6-Qt6==6.7.3

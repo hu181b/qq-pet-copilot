@@ -1,279 +1,63 @@
-name: Build And Release
-
+name: Build portable release
 on:
-  push:
-    tags:
-      - '*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.1.0)'
+        description: Existing release tag (for example v1.0)
         required: true
         type: string
-      ref:
-        description: 'Git ref/branch/commit to build from (optional, default current ref)'
-        required: false
-        type: string
-
+permissions:
+  contents: write
 jobs:
-  build-release:
+  build:
     runs-on: windows-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
-
-      - name: Resolve release tag
-        id: meta
-        shell: pwsh
-        run: |
-          if ('${{ github.event_name }}' -eq 'push') {
-            $tag = '${{ github.ref_name }}'
-            $target = '${{ github.sha }}'
-          } else {
-            $tag = '${{ inputs.tag }}'.Trim()
-            if (-not $tag) {
-              throw 'workflow_dispatch must provide a non-empty "tag" input.'
-            }
-            $target = '${{ inputs.ref }}'.Trim()
-            if (-not $target) {
-              $target = '${{ github.sha }}'
-            }
-          }
-
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "target=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "Release tag: $tag"
-          Write-Host "Target ref: $target"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          # frida 17 需要 Python 3.11+（typing.NotRequired），与本机 venv 的 3.12 一致
           python-version: '3.12'
-
-      - name: Install dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
-      - name: Download OCR v5 models
-        shell: pwsh
+      - name: Install tested GUI dependencies
+        run: python -m pip install -r requirements.txt -c build-constraints.txt
+      - name: Fetch bundled resources
         env:
           PYTHONIOENCODING: utf-8
         run: |
           python tools/fetch_ocr_models.py
-
-      - name: Download scrcpy win64
-        shell: pwsh
-        env:
-          PYTHONIOENCODING: utf-8
-        run: |
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/fetch_scrcpy.py
-
-      - name: Write app version
-        shell: pwsh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/fetch_minitouch.py --arch arm64-v8a
+      - name: Two offline test rounds
+        env:
+          PYTHONIOENCODING: utf-8
+          QT_QPA_PLATFORM: offscreen
         run: |
-          # 打包前把 release tag 写进 src/version.py（exe 内检查更新按它比较）
-          python tools/write_version.py --tag "${{ steps.meta.outputs.tag }}"
-
-      - name: Build with PyInstaller
-        shell: pwsh
+          foreach ($round in 1,2) {
+            foreach ($suite in 'test_full_regression','test_profiles','test_school_navigation','test_window_behavior') {
+              python "tools/$suite.py"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+      - name: Build self-contained EXE
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          # 普通版（真机使用）：dist/QQPetCopilot.exe，不含 frida/模拟器组件
-          python build.py
-
-      - name: Build emulator version with PyInstaller
-        shell: pwsh
-        env:
-          PYTHONIOENCODING: utf-8
-        run: |
-          # 模拟器版：内置 frida 客户端（opener 兜底注入用；frida-server xz 不随包，兜底触发时按提示放置）
-          python build.py --emulator
-
-      - name: Prepare package asset
-        id: package
-        shell: pwsh
-        run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          $src = 'dist/QQPetCopilot.exe'
-          $asset = "QQPetCopilot-$tag-windows-x64.zip"
-          $stageDir = Join-Path $PWD '_release_stage'
-          $stagedExe = Join-Path $stageDir 'QQPetCopilot.exe'
-          if (-not (Test-Path $src)) {
-            throw "Build output not found: $src"
-          }
-          if (Test-Path $stageDir) {
-            Remove-Item -LiteralPath $stageDir -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $stageDir | Out-Null
-          Copy-Item -LiteralPath $src -Destination $stagedExe
-          if (Test-Path $asset) {
-            Remove-Item -LiteralPath $asset -Force
-          }
-          Compress-Archive -Path $stagedExe -DestinationPath $asset -Force
-          Remove-Item -LiteralPath $stageDir -Recurse -Force
-          "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "Package: $asset"
-
-      - name: Prepare emulator package asset
-        id: package_emulator
-        shell: pwsh
-        run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          $src = 'dist/QQPetCopilotEmulator.exe'
-          $asset = "QQPetCopilotEmulator-$tag-windows-x64.zip"
-          $stageDir = Join-Path $PWD '_release_stage_emu'
-          $stagedExe = Join-Path $stageDir 'QQPetCopilotEmulator.exe'
-          if (-not (Test-Path $src)) {
-            throw "Emulator build output not found: $src"
-          }
-          if (Test-Path $stageDir) {
-            Remove-Item -LiteralPath $stageDir -Recurse -Force
-          }
-          New-Item -ItemType Directory -Path $stageDir | Out-Null
-          Copy-Item -LiteralPath $src -Destination $stagedExe
-          if (Test-Path $asset) {
-            Remove-Item -LiteralPath $asset -Force
-          }
-          Compress-Archive -Path $stagedExe -DestinationPath $asset -Force
-          Remove-Item -LiteralPath $stageDir -Recurse -Force
-          "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "Package: $asset"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+          python tools/write_version.py --tag '${{ inputs.tag }}' --repo '${{ github.repository }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m PyInstaller --noconfirm QQPetCopilot.spec
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/package_release.py --tag '${{ inputs.tag }}' --output dist/release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
         with:
-          name: QQPetCopilot-${{ steps.meta.outputs.tag }}-windows-x64
-          path: ${{ steps.package.outputs.asset }}
-
-      - name: Upload emulator workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: QQPetCopilotEmulator-${{ steps.meta.outputs.tag }}-windows-x64
-          path: ${{ steps.package_emulator.outputs.asset }}
-
-      - name: Build release notes (include all commits)
-        id: notes
-        shell: pwsh
+          name: portable-${{ inputs.tag }}
+          path: |
+            dist/release/*.zip
+            dist/release/SHA256SUMS.txt
+      - name: Create draft release without overwriting an existing release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          $target = '${{ steps.meta.outputs.target }}'
-          $repo = '${{ github.repository }}'
-
-          # 确保本地可见所有 tag，避免浅拉取或手动触发时 tag 不完整
-          git fetch --force --tags
-
-          # 计算上一版本 tag（优先按当前 tag 可达历史）
-          $prevTag = ''
-          $tagRefExists = $false
-          try {
-            git rev-parse --verify "refs/tags/$tag" *> $null
-            if ($LASTEXITCODE -eq 0) {
-              $tagRefExists = $true
-            }
-          } catch {
-            $tagRefExists = $false
-          }
-
-          if ($tagRefExists) {
-            try {
-              $prevTag = (git describe --tags --abbrev=0 "$tag^" 2>$null).Trim()
-            } catch {
-              $prevTag = ''
-            }
-          }
-          if (-not $prevTag) {
-            $allTags = @(git tag --sort=-creatordate)
-            foreach ($t in $allTags) {
-              if ($t -and $t.Trim() -ne $tag) {
-                $prevTag = $t.Trim()
-                break
-              }
-            }
-          }
-
-          # 先取 GitHub 自动生成说明（通常偏 PR），再追加全量 commits
-          # 注意：workflow_dispatch 首次发布时，当前 tag 可能尚未在本地存在。
-          # 生成本地 commit 差异时要使用可解析的 toRef（优先 tag，其次 target）。
-          $toRef = $target
-          if ($tagRefExists) {
-            $toRef = $tag
-          }
-
-          if ($prevTag) {
-            $generated = gh api "repos/$repo/releases/generate-notes" -f tag_name="$tag" -f target_commitish="$target" -f previous_tag_name="$prevTag" | ConvertFrom-Json
-            $range = "$prevTag..$toRef"
-            $compareUrl = "https://github.com/$repo/compare/$prevTag...$tag"
-            if (-not $tagRefExists) {
-              $compareUrl = "https://github.com/$repo/compare/$prevTag...$target"
-            }
-            $rangeTitle = "变更范围: $prevTag -> $toRef"
-          } else {
-            $generated = gh api "repos/$repo/releases/generate-notes" -f tag_name="$tag" -f target_commitish="$target" | ConvertFrom-Json
-            $range = $toRef
-            $compareUrl = ''
-            $rangeTitle = "变更范围: $toRef"
-          }
-
-          $commitLines = git log $range --pretty=format:"- %h %s (%an)" --no-color
-          if (-not $commitLines) {
-            $commitLines = '- 无提交记录'
-          }
-
-          $notesFile = 'release_notes.md'
-          $body = @()
-          # 两个 exe 的说明（发布页最顶部，方便下载者选对版本）
-          $body += '## 版本说明'
-          $body += ''
-          $body += '| 文件 | 说明 |'
-          $body += '| --- | --- |'
-          $body += '| `QQPetCopilot.exe` | 普通版：真机（物理手机）使用，标准自动化托管，无需 Root。 |'
-          $body += '| `QQPetCopilotEmulator.exe` | 模拟器版：模拟器（MuMu/雷电 等）使用；内置零注入 opener（MuMu 机型伪装 / 门禁补丁 + 官方 scheme 直开，frida 仅一次性兜底），解决模拟器 QQ 搜索卡片没有宠物入口的问题。Root 按需：日常运行不需要 Root，仅首次打门禁补丁或兜底注入时临时开一次。 |'
-          $body += ''
-          $body += '---'
-          $body += ''
-          $body += [string]$generated.body
-          $body += ''
-          $body += '---'
-          $body += ''
-          $body += '## 全量 Commit 差异'
-          $body += $rangeTitle
-          if ($compareUrl) {
-            $body += "Compare: $compareUrl"
-          }
-          $body += ''
-          $body += $commitLines
-
-          Set-Content -LiteralPath $notesFile -Value ($body -join "`n") -Encoding UTF8
-          "notes_file=$notesFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Create or update GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          $target = '${{ steps.meta.outputs.target }}'
-          $asset = '${{ steps.package.outputs.asset }}'
-          $assetEmu = '${{ steps.package_emulator.outputs.asset }}'
-          $notesFile = '${{ steps.notes.outputs.notes_file }}'
-
-          if (gh release view $tag *> $null) {
-            Write-Host "Release already exists, upload assets with overwrite..."
-            gh release upload $tag $asset $assetEmu --clobber
-            gh release edit $tag --title $tag --notes-file $notesFile --latest
-          } else {
-            Write-Host "Create new release..."
-            gh release create $tag $asset $assetEmu --target $target --title $tag --notes-file $notesFile --latest
-          }
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create '${{ inputs.tag }}' 'dist/release/QQPetCopilot-${{ inputs.tag }}-windows-x64.zip' 'dist/release/SHA256SUMS.txt' --verify-tag --draft --title '${{ inputs.tag }}' --notes-file 'RELEASE-${{ inputs.tag }}.md'

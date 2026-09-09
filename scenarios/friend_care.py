@@ -137,7 +137,7 @@ class FriendCareScenario(VisitScenario):
         care = _FriendCare(self.dev)
         care.energy_threshold = FRIEND_CARE_TARGET
         care.clean_threshold = FRIEND_CARE_TARGET
-        care.toggle_status()
+        care.set_status_expanded(True)
         status = care.read_status_ready()
         source = self.dev.hierarchy()
         energy = status.get('体力')
@@ -156,7 +156,7 @@ class FriendCareScenario(VisitScenario):
             source = self.dev.hierarchy()
         if cared:
             source = care.exit_care_mode(source)
-        care.toggle_status(source)
+        care.set_status_expanded(False, source)
         log('好友状态检查完成，已收起宠物状态')
         return cared
 

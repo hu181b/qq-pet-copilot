@@ -13,26 +13,13 @@ gui:
   theme: 跟随系统
   # 画面镜像开关（主页工具栏开关状态持久化）
   mirror: true
+  # 右上角 ×：关闭程序 / 最小化程序；最小化不停止托管，Alt+F4 仍退出
+  close_action: 关闭程序
 
 # 控制方案：injectInputEvent（默认，uiautomator2 d.touch，走 u2 server 事件注入）/
-# minitouch（openstf minitouch socket 本地直发触摸事件，模拟器上 d.click 不可靠时更稳）
+# minitouch（openstf minitouch socket 本地直发触摸事件，直接发送触摸事件）
 control:
   method: injectInputEvent
-
-# 模拟器信息（异常恢复"重启设备"时自动探测实例用；serial 匹配到多个实例时用于消歧，
-# 全部留空/auto 则纯自动探测，参考 ALAS EmulatorInfo）
-emulator:
-  # 模拟器类型：auto 自动探测，或 MuMuPlayer12 / MuMuPlayer / MuMuPlayerX /
-  # LDPlayer3 / LDPlayer4 / LDPlayer9 / NoxPlayer / NoxPlayer64 /
-  # BlueStacks4 / BlueStacks5 / MEmuPlayer
-  type: auto
-  # 实例名称（留空自动探测）
-  name: ""
-  # 模拟器安装路径（留空自动探测）
-  path: ""
-  # MuMu 机型伪装（需 Root，改写 app 级机型映射让 QQ 以真机身份运行；默认关闭，
-  # 门禁 MMKV 补丁已翻转过的设备无需开启）
-  device_spoof: false
 
 school:
   # 属性点课程选择：力量 / 智力 / 魅力
@@ -205,11 +192,7 @@ tasks:
 recover:
   # 异常恢复方式：重启设备（adb reboot，彻底）/ 重启游戏（只强停并重开 QQ，快）
   method: 重启设备
-  # 模拟器重启命令（模拟器模式"重启设备"用）：MuMu 不支持 adb reboot（会把 adb 服务卡死），
-  # 配了则改为执行该命令重启模拟器整机；留空自动探测 MuMu 实例分步停/启
-  # （src/emulator.py，shutdown -> launch），探测不到才回退 adb reboot
-  # 例（MuMu 12）："D:/Netease/MuMu Player 12/shell/MuMuManager.exe" control -v 0 restart
-  emulator_restart_cmd: ""
+
 
 employed:
   # 被雇佣开关：开启后按时间段+检查间隔出门检查是否被雇佣中

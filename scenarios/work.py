@@ -149,10 +149,10 @@ class WorkScenario(DeviceScenario):
         raise RuntimeError(f'多次未能进入打工地点面板: {self.location}')
 
     def panel_location(self, screen=None) -> str | None:
-        """当前面板的地点名：力量/智力/魅力属性面板正下方第一串字符（整屏 OCR）。"""
+        """确认工作面板特征后识别居中的当前建筑，排除背景中的邻近建筑。"""
         if screen is None:
             screen = self.screen()
-        return parse_panel_location(ocr_fullscreen(screen))
+        return parse_panel_location(ocr_fullscreen(screen), screen.shape[1])
 
     def is_correct_place_panel(self, screen=None) -> bool:
         """判断当前工作面板是不是配置的打工地点（OCR 地点名 == self.location）。"""

@@ -13,18 +13,33 @@ runs/queue_status.json:
 from __future__ import annotations
 
 import json
+import os
+import time
 
 from .config import PROJECT_ROOT
 
 QUEUE_STATUS_FILE = PROJECT_ROOT / 'runs' / 'queue_status.json'
+_last_write = None
 
 
 def save_queue_status(state: dict) -> None:
     """调度器每轮调度后写一次队列状态（写失败只影响展示，不抛异常）。"""
+    global _last_write
     try:
+        # updated 是心跳时间，其他状态没变时最多每 30 秒写一次。
+        key = json.dumps({k:v for k,v in state.items() if k != 'updated'},
+                         ensure_ascii=False, sort_keys=True)
+        now = time.monotonic()
+        path = QUEUE_STATUS_FILE.resolve()
+        if (_last_write is not None and _last_write[:2] == (path,key)
+                and now - _last_write[2] < 30 and path.is_file()):
+            return
         QUEUE_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        QUEUE_STATUS_FILE.write_text(
+        tmp = path.with_name(path.name + '.tmp')
+        tmp.write_text(
             json.dumps(state, ensure_ascii=False), encoding='utf-8')
+        os.replace(tmp,path)
+        _last_write = (path,key,now)
     except OSError:
         pass
 

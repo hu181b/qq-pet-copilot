@@ -142,6 +142,12 @@ def get_engine():
                 'PP-OCRv6 tiny 模型缺失且下载失败，OCR 不可用'
                 f'（模型目录: {MODEL_ROOT}，可运行 python tools/fetch_ocr_models.py）')
         _engine = RapidOCR(params={
+            # 自动化以单张图片串行识别；默认每个模型创建全核线程池会在
+            # 推理间隙自旋抢占前台程序。单线程避免额外线程池和空闲自旋。
+            'EngineConfig.onnxruntime.intra_op_num_threads': 1,
+            'EngineConfig.onnxruntime.inter_op_num_threads': 1,
+            'EngineConfig.onnxruntime.use_cuda': False,
+            'EngineConfig.onnxruntime.use_dml': False,
             'Global.model_root_dir': str(MODEL_ROOT),
             'Global.log_level': 'WARN',  # 抑制引擎 INFO 噪音
             'Det.engine_type': EngineType.ONNXRUNTIME,
@@ -308,49 +314,36 @@ def parse_employed_ratio(
 
 def parse_panel_location(
     results: list[tuple[str, int, int, float]],
+    screen_width: int | None = None,
 ) -> str | None:
-    """在 OCR 结果中解析当前面板的地点名。
+    """确认工作面板后，取属性栏与面板标题之间居中的建筑名称。
 
-    取"力量/智力/魅力"属性面板所在行正下方第一串字符——那是当前打工地点的名字，
-    用于确认当前工作面板是不是配置的打工地点；同一行内多个 OCR 碎片时取
-    离屏幕中心 x 最近的一个（地点名在面板上横向居中，右侧装饰等误识别
-    碎片通常偏在一边）。小镇地图页下方第一行是地点卡片名（通常与配置不符），
-    据此也能区分"在小镇地图 vs 在打工面板"。
-    跳过不含中文的 OCR 误识别碎片（如属性面板下方的装饰元素）
-    避免把这类短串当地点名导致打工面板确认失败。
-    返回去空格后的文字；属性面板没识别到返回 None。
+    小镇背景仍会显示邻近建筑；不能把属性栏下方最靠上的文字当成地点。
+    地点须来自配置选项，且位于屏幕中央区域。缺少面板特征或名称有歧义
+    时返回 None，避免把地图背景误判为已经进入了工作面板。
     """
-    def norm(t: str) -> str:
-        return t.replace(' ', '')
+    from .settings import WORK_LOCATIONS
 
-    def has_cjk(t: str, min_chars: int = 2) -> bool:
-        return sum('\u4e00' <= ch <= '\u9fff' for ch in t) >= min_chars
-
-    stats_y = None
-    for text, x, y, score in results:
-        t = norm(text)
-        if '力量' in t or '智力' in t or '魅力' in t:
-            stats_y = y if stats_y is None else max(stats_y, y)
-    if stats_y is None:
+    rows = [(re.sub(r'\s+', '', t), x, y, s) for t, x, y, s in results if s >= 0.5]
+    stats = [(x, y) for t, x, y, _ in rows
+             if any(name in t for name in ('力量', '智力', '魅力'))]
+    headers = [y for t, _, y, _ in rows if '规则说明' in t]
+    has_controls = any('去打工' in t or '雇佣有额外加成' in t for t, *_ in rows)
+    if not stats or not headers or not has_controls:
         return None
-
-    candidates: list[tuple[str, int, int, float]] = []
-    for text, x, y, score in results:
-        t = norm(text)
-        if not t or y <= stats_y or not has_cjk(t):
-            continue
-        candidates.append((t, x, y, score))
+    center_x = screen_width / 2 if screen_width else sum(x for x, _ in stats) / len(stats)
+    half_band = screen_width / 4 if screen_width else center_x / 2
+    stats_y, panel_y = max(y for _, y in stats), min(headers)
+    candidates = [(t, abs(x - center_x)) for t, x, y, _ in rows
+                  if t in WORK_LOCATIONS and stats_y < y < panel_y
+                  and abs(x - center_x) < half_band]
+    candidates.sort(key=lambda row: row[1])
     if not candidates:
         return None
-
-    candidates.sort(key=lambda c: (c[2], c[1]))
-    center_x = max(x for _, x, _, _ in results) / 2
-    first_y = candidates[0][2]
-    best = min(
-        (c for c in candidates if abs(c[2] - first_y) <= 30),
-        key=lambda c: (abs(c[1] - center_x), c[1]),
-    )
-    return best[0]
+    if len(candidates) > 1 and candidates[0][0] != candidates[1][0]:
+        if candidates[1][1] - candidates[0][1] < half_band * 0.2:
+            return None
+    return candidates[0][0]
 
 
 def parse_employed_remaining(

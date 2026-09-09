@@ -20,12 +20,9 @@ DEFAULTS = {
     'adb.path': 'resources/scrcpy-win64/adb.exe',
     'adb.device_serial': '',
     'gui.theme': '跟随系统',
+    'gui.close_action': '关闭程序',
     'gui.mirror': True,
     'control.method': 'injectInputEvent',
-    'emulator.type': 'auto',
-    'emulator.name': '',
-    'emulator.path': '',
-    'emulator.device_spoof': False,
     'school.attribute': '力量',
     'school.times_per_day': 0,
     'work.location': '风铃旅社',
@@ -68,7 +65,6 @@ DEFAULTS = {
     'employed.time_range': '19:31-23:59',
     'employed.interval_seconds': 60,
     'employed.action': '等到25/75（小于45min）',
-    'recover.emulator_restart_cmd': '',
     'notify.win_toast': True,
     'notify.onepush_config': '',
 }
@@ -111,11 +107,8 @@ def validate_field(key: str, value):
         return (True, value) if value in ('injectInputEvent', 'minitouch') else (False, default)
     if key == 'gui.theme':
         return (True, value) if value in ('跟随系统', '深色', '浅色') else (False, default)
-    if key == 'emulator.type':
-        from .emulator import EMULATOR_TYPES
-        return (True, value) if value in ('auto', *EMULATOR_TYPES) else (False, default)
-    if key in ('emulator.name', 'emulator.path'):
-        return True, str(value).strip()
+    if key == 'gui.close_action':
+        return (True, value) if value in ('关闭程序', '最小化程序') else (False, default)
     if key == 'tasks.order':
         keys = [k.strip() for k in str(value).split('>') if k.strip()]
         if keys and all(k in TASK_KEYS for k in keys):
@@ -151,7 +144,7 @@ def validate_field(key: str, value):
         except (TypeError, ValueError):
             return False, default
     if key == 'notify.win_toast' or key == 'adventure.skip_bad_weather' \
-            or key == 'emulator.device_spoof' or key == 'gui.mirror':
+            or key == 'gui.mirror':
         return (True, value) if isinstance(value, bool) else (False, default)
     if key == 'notify.onepush_config':
         # OnePush 推送配置（YAML，支持多行）：留空，或能解析出含 provider 的字典

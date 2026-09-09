@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PyQt6.QtCore import QObject, QSize, Qt, QTime, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTime, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -34,7 +34,9 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QSizePolicy,
+    QSizeGrip,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -67,6 +69,8 @@ from qfluentwidgets import (
 )
 
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
+from qfluentwidgets.components.navigation.navigation_bar import NavigationBar
+from qfluentwidgets.components.navigation.navigation_widget import NavigationPushButton
 
 import win32con
 import win32gui
@@ -74,13 +78,12 @@ import win32process
 
 from src import settings as settings_io
 from src.adb.device import Device
-from src.emulator import EMULATOR_TYPES
 from src.config import (
     APP_ROOT,
     PROJECT_ROOT,
+    PROFILE_ID,
     TASK_KEYS,
     find_adb,
-    is_emulator_build,
     load_config,
     resource_path,
 )
@@ -112,7 +115,7 @@ if TYPE_CHECKING:
 
 SCRCPY = resource_path('resources/scrcpy-win64') / 'scrcpy.exe'
 SCRCPY_TITLE_PREFIX = 'QQPetCopilotScrcpy'
-RUNNER_SCRIPT = PROJECT_ROOT / 'scenarios' / 'runner.py'
+RUNNER_SCRIPT = APP_ROOT / 'scenarios' / 'runner.py'
 EMBED_TRIES = 40  # 查找 scrcpy 窗口的次数（每次 500ms）
 LOG_MAX_LINES = 5000  # 日志区显示行数上限（超出自动丢弃最旧的行；完整日志在 runs/logs/ 文件里）
 SCRCPY_WATCHDOG_MS = 5000    # scrcpy 看门狗轮询间隔（毫秒）
@@ -128,6 +131,50 @@ ONEPUSH_HELP_URL = ('https://github.com/LmeSzinc/AzurLaneAutoScript'
 
 # 主题设置项（gui.theme）-> qfluentwidgets Theme
 THEME_MAP = {'跟随系统': Theme.AUTO, '深色': Theme.DARK, '浅色': Theme.LIGHT}
+
+class ResizeEdge(QWidget):
+    """窗口边缘透明命中区：固定方向光标，左键交给系统执行拖动缩放。"""
+
+    def __init__(self, parent, edges, cursor):
+        super().__init__(parent)
+        self.edges = edges
+        self.setMouseTracking(True)
+        self.setCursor(cursor)
+        self.setToolTip('按住左键拖动调整窗口大小')
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            window = self.window()
+            if not window.isMaximized() and not window.isFullScreen():
+                if window.windowHandle().startSystemResize(self.edges):
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+
+class CompactNavigationBar(NavigationBar):
+    """40 像素图标按钮，页面名称通过悬停提示和无障碍名称保留。"""
+
+    def insertItem(self, index, routeKey, icon, text, onClick=None, selectable=True,
+                   selectedIcon=None, position=NavigationItemPosition.TOP):
+        if routeKey in self.items:
+            return self.items[routeKey]
+        button = NavigationPushButton(icon, text, selectable, self)
+        button.setToolTip(text)
+        button.setAccessibleName(text)
+        self.insertWidget(index, routeKey, button, onClick, position)
+        return button
+
+
+class ToolbarActionButton(PushButton):
+    """文字收起时居中绘制图标，避免 Fluent 文本按钮的最小宽度偏移。"""
+
+    def _drawIcon(self, icon, painter, rect, *args):
+        if not self.text():
+            rect = QRectF((self.width() - rect.width()) / 2,
+                          (self.height() - rect.height()) / 2, rect.width(), rect.height())
+        super()._drawIcon(icon, painter, rect, *args)
+
 
 class _TestSignals(QObject):
     """连接测试按钮：后台线程 -> GUI 主线程 的信号（跨线程安全）。"""
@@ -190,6 +237,60 @@ class LogView(PlainTextEdit):
         super().mouseMoveEvent(event)
 
 
+class ClickToEdit(QWidget):
+    """调度单元格先显示只读值，明确左键点击后才露出编辑控件。"""
+
+    def __init__(self, editor):
+        super().__init__()
+        self.editor = editor
+        self.display = LineEdit()
+        self.display.setReadOnly(True)
+        self.display.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.display.setCursor(Qt.CursorShape.ArrowCursor)
+        self.display.setText(editor.text())
+        self.display.setToolTip('点击后修改；回车或离开输入框完成编辑')
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.display)
+        layout.addWidget(editor)
+        self.setEnabled(editor.isEnabled())
+        editor.hide()
+        self._finish_on_enter = False
+        self._finish_timer = QTimer(self, singleShot=True, interval=0, timeout=self._finish)
+        self.display.installEventFilter(self)
+        editor.installEventFilter(self)
+        for child in editor.findChildren(QWidget):
+            child.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self.display:
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self.display.hide()
+                self.editor.show()
+                self.editor.setFocus(Qt.FocusReason.MouseFocusReason)
+                self.editor.selectAll()
+                return True
+            if event.type() == QEvent.Type.Wheel:
+                event.ignore()
+                return True
+        else:
+            if event.type() == QEvent.Type.FocusOut:
+                self._finish_timer.start()
+            elif event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._finish_on_enter = True
+                self._finish_timer.start()
+        return super().eventFilter(obj, event)
+
+    def _finish(self):
+        focus = QApplication.focusWidget()
+        if not self._finish_on_enter and (focus is self.editor or self.editor.isAncestorOf(focus)):
+            return
+        self._finish_on_enter = False
+        self.display.setText(self.editor.text())
+        self.editor.hide()
+        self.display.show()
+
+
 class _NoWheelSpinBox(SpinBox):
     """数字输入框：禁用鼠标滚轮改值（滚轮悬停数字框容易误触加减，防手滑）。
 
@@ -226,10 +327,6 @@ SETTING_FIELDS = [
     ('adb.path', 'adb 路径', 'str'),
     ('adb.device_serial', '设备序列号', 'devices'),
     ('control.method', '控制方案', ['injectInputEvent', 'minitouch']),
-    ('emulator.type', '模拟器类型', ['auto'] + EMULATOR_TYPES),
-    ('emulator.name', '实例名称（留空自动探测）', 'str'),
-    ('emulator.path', '模拟器安装路径（留空自动探测）', 'str'),
-    ('emulator.device_spoof', 'MuMu 机型伪装（需 Root，默认关闭）', 'bool'),
     ('runner.engine', '调度引擎', ['task_queue', 'legacy']),
     ('tasks.failure_interval', '任务失败重试间隔（秒）', 'int'),
     ('schedule.coin_threshold', '金币阈值', 'int'),
@@ -237,16 +334,9 @@ SETTING_FIELDS = [
     ('schedule.main_page_checks', '主页面检测次数', 'int'),
     ('schedule.back_method', '返回方式', ['系统返回', '返回图标']),
     ('recover.method', '异常处理方式', ['重启设备', '重启游戏']),
-    ('recover.emulator_restart_cmd', '模拟器重启命令（留空自动探测）', 'str'),
     ('notify.win_toast', '失败告警 Windows 通知', 'bool'),
     ('notify.onepush_config', '失败告警 OnePush 配置', 'text'),
 ]
-
-# 模拟器专用设置项：非模拟器模式在设置页隐藏
-EMULATOR_SETTING_KEYS = {
-    'emulator.type', 'emulator.name', 'emulator.path', 'emulator.device_spoof',
-    'recover.emulator_restart_cmd',
-}
 
 # 任务选项卡字段：任务队列顺序 + 各场景任务相关设置
 TASK_SETTING_FIELDS = [
@@ -297,7 +387,7 @@ SCHEDULE_TASK_NAMES = {'care': '护理', 'adventure': '冒险', 'visit': '踩踩
 SETTING_GROUP_TITLES = {
     'adb': '连接', 'control': '连接',
     'gui': '界面',
-    'emulator': '模拟器', 'recover': '异常恢复',
+    'recover': '异常恢复',
     'runner': '调度引擎', 'tasks': '任务队列', 'schedule': '全局规则',
     'notify': '告警通知',
     'school': '学习', 'work': '打工', 'adventure': '冒险',
@@ -342,6 +432,13 @@ def kill_our_scrcpy(proc: subprocess.Popen | None = None) -> None:
     """
     if proc is not None and proc.poll() is None:
         proc.terminate()
+        try:
+            proc.wait(timeout=2)
+            return  # 已跟踪进程退出，无需每次启动 PowerShell/WMI 扫描。
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+            return
     try:
         _kill_scrcpy_by_marker(_scrcpy_title())
     except Exception:
@@ -377,8 +474,33 @@ def _scrcpy_port(serial: str) -> str:
     return f'{port}:{port + 7}'
 
 
-def start_scrcpy(emulator: bool = False) -> subprocess.Popen | None:
-    """以无边框、关屏（模拟器除外）、固定标题启动 scrcpy，返回进程。"""
+def window_is_foreground(window) -> bool:
+    """嵌入的 scrcpy 属于另一个进程，Qt 活跃状态不足以判断前后台。"""
+    if sys.platform == 'win32' and hasattr(window, 'winId'):
+        try:
+            foreground = win32gui.GetForegroundWindow()
+            if not foreground:
+                return window.isActiveWindow()
+            try:
+                _, foreground_pid = win32process.GetWindowThreadProcessId(foreground)
+            except Exception:
+                foreground_pid = None
+            if foreground_pid == os.getpid():
+                return True
+            # SDL can retain its own root/owner after cross-process SetParent.
+            mirror = getattr(window, '_scrcpy_proc', None)
+            if mirror is not None and mirror.poll() is None and foreground_pid == mirror.pid:
+                return True
+            # GA_ROOTOWNER 同时覆盖 SetParent 的原生子窗口及本窗口弹出的对话框。
+            return bool(foreground and win32gui.GetAncestor(foreground, 3)
+                        == win32gui.GetAncestor(int(window.winId()), 3))
+        except Exception:
+            pass
+    return window.isActiveWindow()
+
+
+def start_scrcpy() -> subprocess.Popen | None:
+    """以无边框、关屏、固定标题启动 scrcpy，返回进程。"""
     if not SCRCPY.is_file():
         log(f'未找到 {SCRCPY}，跳过 scrcpy 启动')
         return None
@@ -386,16 +508,15 @@ def start_scrcpy(emulator: bool = False) -> subprocess.Popen | None:
     serial = load_config().adb.device_serial
     if serial:  # 指定设备序列号
         cmd += ['-s', serial]
-    cmd += ['--no-audio']  # 只要画面，不要音频（镜像/自动化用不到声音）
-    if not emulator:
-        # 模拟器没有物理屏幕可关，--turn-screen-off 无效且可能报错
-        cmd.append('--turn-screen-off')
+    cmd += ['--no-audio', '--max-size=1024', '--max-fps=15', '--video-bit-rate=2M']
+    # 镜像仅用于预览；自动化仍使用原始截图，不受预览尺寸/帧率影响。
+    cmd.append('--turn-screen-off')
     cmd += ['--window-borderless', '--stay-awake',
             f'--port={_scrcpy_port(serial or "")}',  # 多开防端口撞车串台
             f'--window-title={_scrcpy_title()}',
             # 先放到屏幕外，嵌入容器时再移回来，避免窗口先弹出再嵌入的闪烁
             '--window-x=-2000', '--window-y=-2000']
-    flags = '--no-audio' + ('' if emulator else ' --turn-screen-off') + ' --window-borderless'
+    flags = '--no-audio' + ' --turn-screen-off' + ' --window-borderless'
     log(f'启动 scrcpy（{flags}'
         + (f'，设备 {serial}）...' if serial else '）...'))
     proc = subprocess.Popen(
@@ -412,17 +533,13 @@ def start_scrcpy(emulator: bool = False) -> subprocess.Popen | None:
     return proc
 
 
-def start_scrcpy_screen_off(emulator: bool = False) -> subprocess.Popen | None:
+def start_scrcpy_screen_off() -> subprocess.Popen | None:
     """无头 scrcpy 关闭设备屏幕：--turn-screen-off + 保持唤醒，不传画面/音频/不开窗口。
 
     画面镜像关闭后用它把设备屏幕真正关掉（比亮度 0 更彻底）；
     --stay-awake 让设备保持唤醒（渲染管线不断，OCR/自动化照常），
     --no-window 不显示任何窗口。返回进程；失败返回 None（屏幕保持原状）。
-    模拟器没有物理屏幕可关：emulator=True 时记日志直接返回 None。
     """
-    if emulator:
-        log('模拟器模式：跳过关屏（模拟器无物理屏幕可关）')
-        return None
     if not SCRCPY.is_file():
         log(f'未找到 {SCRCPY}，跳过屏幕关闭')
         return None
@@ -478,36 +595,39 @@ def find_scrcpy_hwnd(proc: subprocess.Popen | None = None) -> int | None:
 class ScrcpyContainer(QWidget):
     """scrcpy 窗口的嵌入容器，按手机屏幕比例等比适配并居中。
 
-    手机屏幕是 9:16 竖屏：sizeHint/heightForWidth 按竖屏比例报尺寸，
-    让布局给画面区预留竖屏空间；设备未连接或比例读取失败时 _fit 也按
-    (9, 16) 兜底，避免拿到横屏/空比例时把嵌入窗口拉成宽屏。
+    比例只在 _fit 中处理，不把画面比例传成顶层窗口的尺寸约束。
+    设备未连接或比例读取失败时按 (9, 16) 兜底。
     """
 
     def __init__(self):
         super().__init__()
         self._hwnd: int | None = None
         self._aspect: tuple[int, int] | None = None  # 手机屏幕物理像素 (宽, 高)
+        self._last_geometry = None
         # 普通 QWidget 子类要开 WA_StyledBackground，样式表背景才会真正绘制
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # 未嵌入时跟随主题背景（透出下层卡片色），不显示死黑一块；
         # 嵌入后画面按真实比例正好铺满，无需黑色留白
         self.setStyleSheet('background: transparent; border-radius: 8px;')
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(160)
 
     def sizeHint(self) -> QSize:
         return QSize(360, 640)  # 9:16 竖屏
 
     def hasHeightForWidth(self) -> bool:
-        return True
+        # 原生 Windows 会把顶层布局的 height-for-width 当作高度约束，
+        # 导致用户拖动后窗口又弹回。画面比例只由 _fit 内部留白/缩放保证。
+        return False
 
     def heightForWidth(self, width: int) -> int:
         return width * 16 // 9  # 9:16 竖屏
 
     def set_hwnd(self, hwnd: int | None) -> None:
         self._hwnd = hwnd
+        self._last_geometry = None
 
     def embed(self, hwnd: int, aspect: tuple[int, int] | None = None) -> None:
-        self._hwnd = hwnd
+        self.set_hwnd(hwnd)
         win32gui.SetParent(hwnd, int(self.winId()))
         # 缩放前先取 scrcpy 窗口客户区真实尺寸作为嵌入比例（客户区 = 视频画面大小，
         # 自适应任何设备与 --max-size 设置）；device_aspect 的设备物理分辨率比例
@@ -523,8 +643,9 @@ class ScrcpyContainer(QWidget):
         style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
         win32gui.SetWindowLong(
             hwnd, win32con.GWL_STYLE,
-            style & ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME
-                      | win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX),
+            (style & ~(win32con.WS_POPUP | win32con.WS_CAPTION | win32con.WS_THICKFRAME
+                       | win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX))
+            | win32con.WS_CHILD,
         )
         win32gui.SetWindowPos(
             hwnd, None, 0, 0, self.width(), self.height(),
@@ -543,7 +664,11 @@ class ScrcpyContainer(QWidget):
         scale = min(cw / aw, ch / ah)
         w, h = int(aw * scale), int(ah * scale)
         x, y = (cw - w) // 2, (ch - h) // 2
-        win32gui.MoveWindow(self._hwnd, x, y, w, h, True)
+        geometry = (x, y, w, h)
+        if geometry != self._last_geometry:
+            win32gui.SetWindowPos(self._hwnd, None, x, y, w, h,
+                                 win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
+            self._last_geometry = geometry
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -642,16 +767,60 @@ class MainWindow(MSFluentWindow):
     # 检查更新结果回投 GUI 线程：(manual, UpdateCheckResult)
     _sig_update_result = pyqtSignal(object)
 
-    def __init__(self, emulator_mode: bool = False, emulator_device: str | None = None):
+    def updateFrameless(self):
+        super().updateFrameless()
+        self._remove_native_caption()
+
+    def _remove_native_caption(self):
+        # qframelesswindow 为窗口动画加回 WS_CAPTION；系统移动窗口时可能
+        # 绘出第二条原生标题栏。只移除 caption，保留缩放框和最大/最小化能力。
+        if sys.platform != 'win32' or QApplication.platformName() != 'windows':
+            return
+        hwnd = int(self.winId())
+        style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+        if style & win32con.WS_CAPTION:
+            win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style & ~win32con.WS_CAPTION)
+            win32gui.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                 win32con.SWP_NOMOVE | win32con.SWP_NOSIZE |
+                                 win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE |
+                                 win32con.SWP_FRAMECHANGED)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._remove_native_caption()
+
+    def __init__(self):
         super().__init__()
-        self.emulator_mode = emulator_mode
-        self.emulator_device = emulator_device
-        if emulator_mode:
-            log('模拟器模式：调度器将用 opener（一次性初始化 + intent 直开）打开 QQ 宠物主页')
-        self.setWindowTitle(f'QQ 宠物自动化助手 v{APP_VERSION}'
-                            + ('（模拟器版）' if emulator_mode else ''))
+        self._next_profile = None
+        old_navigation = self.navigationInterface
+        self.hBoxLayout.removeWidget(old_navigation)
+        old_navigation.hide()
+        old_navigation.deleteLater()
+        self.navigationInterface = CompactNavigationBar(self)
+        self.navigationInterface.setFixedWidth(48)
+        self.hBoxLayout.insertWidget(0, self.navigationInterface)
+        self.titleBar.setFixedHeight(32)
+        self.titleBar.closeBtn.clicked.disconnect()
+        self.titleBar.closeBtn.clicked.connect(self._on_title_close)
+        self.hBoxLayout.setContentsMargins(0, 32, 0, 0)
+        self.setWindowTitle(f'QQ 宠物自动化助手 v{APP_VERSION}')
         self.resize(1280, 820)
-        self.setMinimumSize(1100, 700)
+        self.setMinimumSize(800, 500)
+        self.setResizeEnabled(True)
+        self.BORDER_WIDTH = 8  # 无边框窗口的边缘拖动区域更容易命中。
+        self._size_grip = QSizeGrip(self)
+        self._size_grip.setToolTip('拖动调整窗口大小')
+        edge, cursor = Qt.Edge, Qt.CursorShape
+        self._resize_edges = [
+            ResizeEdge(self, edge.LeftEdge, cursor.SizeHorCursor),
+            ResizeEdge(self, edge.RightEdge, cursor.SizeHorCursor),
+            ResizeEdge(self, edge.TopEdge, cursor.SizeVerCursor),
+            ResizeEdge(self, edge.BottomEdge, cursor.SizeVerCursor),
+            ResizeEdge(self, edge.LeftEdge | edge.TopEdge, cursor.SizeFDiagCursor),
+            ResizeEdge(self, edge.RightEdge | edge.TopEdge, cursor.SizeBDiagCursor),
+            ResizeEdge(self, edge.LeftEdge | edge.BottomEdge, cursor.SizeBDiagCursor),
+            ResizeEdge(self, edge.RightEdge | edge.BottomEdge, cursor.SizeFDiagCursor),
+        ]
 
         self.scrcpy_view = ScrcpyContainer()
         self.log_view = LogView(readOnly=True)
@@ -661,11 +830,6 @@ class MainWindow(MSFluentWindow):
         self._setting_widgets: dict = {}
         # 护理方式选"一键护理"时体力/清洁阈值用不上，隐藏对应表单行（label + 控件）
         self._care_threshold_rows: dict = {}
-        # 模拟器相关设置行（label + 控件），非模拟器模式隐藏
-        self._emulator_rows: list = []
-        # 实例名称/安装路径的自动填充记录（key -> 上次自动填的值），
-        # 换设备后区分"自动填的"和"用户手改的"，只作废前者
-        self._emulator_autofill: dict = {}
         # 主页宠物状态卡片：缓存字段 -> 数值标签（每秒刷新，见 _refresh_stats）
         self._status_values: dict = {}
 
@@ -674,6 +838,7 @@ class MainWindow(MSFluentWindow):
         self._init_navigation()
 
         self._scrcpy_proc: subprocess.Popen | None = None
+        self._background_mirror_paused = False
         self._runner_proc: subprocess.Popen | None = None
         self._runner_started_at: float | None = None  # 调度器启动时刻（monotonic），主页显示运行时间用
         self._recovering = False  # 手动重启进行中：期间开始/停止按钮联动禁用
@@ -743,17 +908,20 @@ class MainWindow(MSFluentWindow):
         self.btn_scrcpy.setChecked(load_config().gui.mirror)
         self.btn_scrcpy.checkedChanged.connect(self._toggle_scrcpy)
         # 连接测试：u2 截图 + OCR 识别 + 控件树拉取 耗时（后台线程执行，结果在日志页）
-        self._btn_connect_test = PushButton('连接测试', self, FIF.LINK)
+        self._btn_connect_test = ToolbarActionButton('连接测试', self, FIF.LINK)
         self._btn_connect_test.clicked.connect(self._test_connect)
         # 手动重启：按 recover.method 配置执行一次异常恢复（重启设备/重启游戏回宠物页）
-        self._btn_manual_recover = PushButton('手动重启', self, FIF.SYNC)
+        self._btn_manual_recover = ToolbarActionButton('手动重启', self, FIF.SYNC)
         self._btn_manual_recover.clicked.connect(self._manual_recover)
 
     def _build_toolbar(self) -> CardWidget:
         """顶部全局工具栏：开始/停止 + 画面镜像开关 + 连接测试/手动重启，右侧运行时间。"""
         card = CardWidget(self)
+        self._toolbar_card = card
+        self._toolbar_compact = None
+        card.setFixedHeight(56)
         row = QHBoxLayout(card)
-        row.setContentsMargins(14, 8, 14, 8)
+        row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(10)
         row.addWidget(self.btn_start)
         row.addWidget(self.btn_stop)
@@ -766,14 +934,31 @@ class MainWindow(MSFluentWindow):
         row.addStretch(1)
         self._runtime_label = BodyLabel('运行时间 0小时0分钟')
         row.addWidget(self._runtime_label)
+        self._btn_connect_test.setToolTip('连接测试：检查设备连接和识别')
+        self._btn_manual_recover.setToolTip('手动重启：恢复 QQ 宠物页面')
         return card
+
+    def _update_chrome_layout(self):
+        card = getattr(self, '_toolbar_card', None)
+        if card is None:
+            return
+        compact = card.width() < 900
+        if compact == self._toolbar_compact:
+            return
+        self._toolbar_compact = compact
+        # 小窗口保留主按钮文字，辅助操作用原图标和提示，避免工具栏变成两行。
+        self._btn_connect_test.setText('' if compact else '连接测试')
+        self._btn_manual_recover.setText('' if compact else '手动重启')
+        for button in (self._btn_connect_test, self._btn_manual_recover):
+            button.setMinimumWidth(36 if compact else 0)
+            button.setMaximumWidth(36 if compact else 16777215)
 
     def _install_toolbar(self) -> None:
         """把 stackedWidget 包进右侧容器（上工具栏、下页面堆栈），
         工具栏固定在窗口内容区顶部，切换导航页不受影响。"""
         right = QWidget()
         box = QVBoxLayout(right)
-        box.setContentsMargins(16, 8, 16, 0)
+        box.setContentsMargins(4, 8, 16, 0)
         box.setSpacing(10)
         box.addWidget(self._build_toolbar())
         self.hBoxLayout.removeWidget(self.stackedWidget)
@@ -781,15 +966,17 @@ class MainWindow(MSFluentWindow):
         self.hBoxLayout.addWidget(right, 1)
 
     def _init_navigation(self) -> None:
-        """左侧 Fluent 导航栏：主页/调度/统计/任务/设置（设置固定在底部）。"""
+        """导航按钮统一在顶部排列，尺寸变化时保持相同位置和间距。"""
+        self.navigationInterface.vBoxLayout.setContentsMargins(0, 8, 0, 12)
+        self.navigationInterface.topLayout.setContentsMargins(4, 0, 4, 0)
+        self.navigationInterface.setIndicatorAnimationEnabled(False)
         self.addSubInterface(self._build_home_page(), FIF.HOME, '主页')
         self.addSubInterface(self._build_schedule_page(), FIF.CALENDAR, '调度')
         self.stats_panel = StatsPanel()
         self.stats_panel.setObjectName('statsPage')
         self.addSubInterface(self._wrap_page(self.stats_panel), FIF.HISTORY, '统计')
         self.addSubInterface(self._build_tasks_page(), FIF.TILES, '任务')
-        self.addSubInterface(self._build_settings_page(), FIF.SETTING, '设置',
-                             position=NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self._build_settings_page(), FIF.SETTING, '设置')
         self.stackedWidget.currentChanged.connect(self._on_tab_changed)
 
     @staticmethod
@@ -804,13 +991,14 @@ class MainWindow(MSFluentWindow):
         右侧 上=宠物状态、中=今日统计、下=日志（吃掉剩余空间）。"""
         page = QWidget()
         page.setObjectName('homePage')
+        self._home_page = page
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 4, 0, 12)
         layout.setSpacing(16)
 
         self._screen_card = SimpleCardWidget()
         screen_layout = QVBoxLayout(self._screen_card)
-        screen_layout.setContentsMargins(10, 10, 10, 10)
+        screen_layout.setContentsMargins(4, 4, 4, 4)
         screen_layout.addWidget(self.scrcpy_view)
         # 画面卡宽度 = 高度 × 画面比例（_fit_screen_card，窗口缩放/嵌入后重算），
         # 不用 QSplitter：把手在深色主题下会渲染成一条白色竖条，且宽度本就由
@@ -830,30 +1018,149 @@ class MainWindow(MSFluentWindow):
         queue_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         today_card = self._build_today_card()
         today_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        side_layout.addWidget(self._build_profile_card())
         side_layout.addWidget(status_card)
         side_layout.addWidget(queue_card)
         side_layout.addWidget(today_card)
-        side_layout.addWidget(self._build_log_card(), 1)
-        layout.addWidget(side, 1)
+        log_card = self._build_log_card()
+        log_card.setMinimumHeight(160)
+        side_layout.addWidget(log_card, 1)
+        self._home_scroll = ScrollArea()
+        self._home_scroll.setWidgetResizable(True)
+        self._home_scroll.setStyleSheet('QScrollArea { background: transparent; border: none; }')
+        self._home_scroll.setWidget(side)
+        layout.addWidget(self._home_scroll, 1)
         return page
+
+    def _build_profile_card(self):
+        from src.profiles import ProfileStore
+        self._profiles = ProfileStore(APP_ROOT)
+        card = SimpleCardWidget()
+        layout = QVBoxLayout(card)
+        row = QHBoxLayout()
+        row.addWidget(StrongBodyLabel('配置'))
+        self.profile_combo = ComboBox()
+        self._fill_profiles()
+        row.addWidget(self.profile_combo, 1)
+        for title, action in [('新建', self._new_profile), ('重命名', self._rename_profile),
+                              ('切换', self._switch_profile)]:
+            button = PushButton(title)
+            button.clicked.connect(action)
+            row.addWidget(button)
+        layout.addLayout(row)
+        active_name = self._profiles.read()['profiles'][PROFILE_ID]
+        self.profile_active_label = CaptionLabel(f'当前：{active_name} · 停止调度后切换，界面将重新打开')
+        layout.addWidget(self.profile_active_label)
+        return card
+
+    def _fill_profiles(self, selected=PROFILE_ID):
+        self.profile_combo.clear()
+        for key, name in self._profiles.read()['profiles'].items():
+            self.profile_combo.addItem(name, userData=key)
+        self.profile_combo.setCurrentIndex(self.profile_combo.findData(selected))
+
+    def _profile_error(self, error):
+        MessageBox('配置管理', str(error), self).exec()
+
+    def _new_profile(self):
+        name, ok = QInputDialog.getText(self, '新建配置', '自定义名称（复制当前设置，统计从零开始）：')
+        if ok:
+            try:
+                key = self._profiles.create(name, PROFILE_ID)
+                self._fill_profiles(key)
+            except Exception as exc:
+                self._profile_error(exc)
+
+    def _rename_profile(self):
+        key = self.profile_combo.currentData()
+        name, ok = QInputDialog.getText(self, '重命名配置', '配置名称：', text=self.profile_combo.currentText())
+        if ok:
+            try:
+                self._profiles.rename(key, name)
+                self._fill_profiles(key)
+                if key == PROFILE_ID:
+                    self.profile_active_label.setText(f'当前：{name.strip()} · 停止调度后切换，界面将重新打开')
+            except Exception as exc:
+                self._profile_error(exc)
+
+    def _switch_profile(self):
+        key = self.profile_combo.currentData()
+        if key == PROFILE_ID:
+            return
+        if self._recovering or self._test_lock.locked() or (self._runner_proc and self._runner_proc.poll() is None):
+            self._profile_error('请先停止调度，并等待连接测试或手动重启完成，再切换配置。')
+            return
+        try:
+            self._profiles.select(key)
+            self._restart_timer.stop()
+            self._next_profile = key
+            self.close()
+        except Exception as exc:
+            self._profile_error(exc)
 
     def _fit_screen_card(self) -> None:
         """把画面卡宽度收成 高度×画面比例（消除两侧黑边），窗口缩放和嵌入后调用。"""
         card = getattr(self, '_screen_card', None)
         if card is None:
             return
-        h = card.height() - 20  # 卡片内边距 10×2
+        h = card.height() - 8  # 卡片内边距 4×2
         if h <= 0:
             return
         aw, ah = self.scrcpy_view._aspect or (9, 16)
         if not aw or not ah:
             aw, ah = 9, 16
-        card.setFixedWidth(max(300, int(h * aw / ah) + 20))
+        # 同时受可用宽度限制，不能由高度反推的固定宽度把主窗口撑回去。
+        available = max(180, self._home_page.width() - 440)
+        target = min(available, max(180, int(h * aw / ah) + 8))
+        if card.width() != target:
+            card.setFixedWidth(target)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         # 等布局算完再按新高度收宽度（resizeEvent 触发时 height 还是旧值）
         QTimer.singleShot(0, self._fit_screen_card)
+        QTimer.singleShot(0, self._update_chrome_layout)
+        grip = getattr(self, '_size_grip', None)
+        if grip is not None:
+            grip.setVisible(not self.isMaximized() and not self.isFullScreen())
+            grip.resize(20, 20)
+            grip.move(self.width() - 22, self.height() - 22)
+            grip.raise_()
+        self._position_resize_edges()
+
+    def _position_resize_edges(self):
+        handles = getattr(self, '_resize_edges', ())
+        w, h, b = self.width(), self.height(), self.BORDER_WIDTH
+        rects = [(0,b,b,h-2*b), (w-b,b,b,h-2*b), (b,0,w-2*b,b),
+                 (b,h-b,w-2*b,b), (0,0,b,b), (w-b,0,b,b),
+                 (0,h-b,b,b), (w-b,h-b,b,b)]
+        for handle, rect in zip(handles, rects):
+            handle.setGeometry(*rect)
+            handle.setVisible(not self.isMaximized() and not self.isFullScreen())
+            handle.raise_()
+
+    def nativeEvent(self, eventType, message):
+        # Windows 非客户区命中可能先于 Qt 子控件收到事件，显式设置对应系统光标。
+        if sys.platform == 'win32':
+            from ctypes.wintypes import MSG
+            msg = MSG.from_address(int(message))
+            if (msg.message == win32con.WM_SETCURSOR and not self.isMaximized()
+                    and not self.isFullScreen()):
+                shapes = {
+                    win32con.HTLEFT: win32con.IDC_SIZEWE,
+                    win32con.HTRIGHT: win32con.IDC_SIZEWE,
+                    win32con.HTTOP: win32con.IDC_SIZENS,
+                    win32con.HTBOTTOM: win32con.IDC_SIZENS,
+                    win32con.HTTOPLEFT: win32con.IDC_SIZENWSE,
+                    win32con.HTBOTTOMRIGHT: win32con.IDC_SIZENWSE,
+                    win32con.HTTOPRIGHT: win32con.IDC_SIZENESW,
+                    win32con.HTBOTTOMLEFT: win32con.IDC_SIZENESW,
+                }
+                shape = shapes.get(msg.lParam & 0xffff)
+                if shape:
+                    win32gui.SetCursor(win32gui.LoadCursor(None, shape))
+                    return True, 1
+        return super().nativeEvent(eventType, message)
 
     def _build_status_card(self) -> HeaderCardWidget:
         """宠物状态卡片：体力/清洁/心情/金币/饼干/香皂 横排一行均匀分布。"""
@@ -946,17 +1253,13 @@ class MainWindow(MSFluentWindow):
     def _start_all(self) -> None:
         # Qt 槽里未捕获的异常会直接 abort 进程（无 traceback 的"闪退"），
         # 启动失败记日志并继续，调度器仍可手动开始
-        if self.emulator_mode:
-            # 模拟器模式：目标 adb 设备不在线时后台启动所属模拟器实例（不阻塞 Qt 线程；
-            # 设备上线后 scrcpy 看门狗会自动拉起并重嵌入）
-            threading.Thread(target=self._ensure_emulator_device, daemon=True).start()
         try:
             kill_previous_scrcpy()
             if self.btn_scrcpy.isChecked():
-                self._scrcpy_proc = start_scrcpy(self.emulator_mode)
+                self._scrcpy_proc = start_scrcpy()
             else:
                 log('画面镜像开关关闭，跳过启动')
-                self._screen_off_proc = start_scrcpy_screen_off(self.emulator_mode)
+                self._screen_off_proc = start_scrcpy_screen_off()
         except Exception:
             import traceback
 
@@ -967,27 +1270,6 @@ class MainWindow(MSFluentWindow):
             self._embed_fail_logged = False
             self._embed_timer.start(500)
 
-    def _ensure_emulator_device(self) -> None:
-        """模拟器模式启动时：目标 adb 设备不在线则探测并启动所属模拟器实例。
-
-        后台线程执行（模拟器开机要等几十秒）；只启动不重启，设备本来在线直接返回。
-        """
-        try:
-            cfg = load_config()
-            serial = self.emulator_device or cfg.adb.device_serial
-            if not serial:
-                return
-            adb = Device(find_adb(cfg.adb.path), serial)
-            if ':' in serial:
-                adb.connect_remote(serial)
-            if serial in adb.online_devices():
-                return
-            from src.recover import launch_emulator_if_offline
-            launch_emulator_if_offline(adb, cfg.emulator)
-        except Exception:
-            import traceback
-
-            log(f'检查/启动模拟器失败:\n{traceback.format_exc()}')
 
     def _try_embed(self) -> None:
         hwnd = find_scrcpy_hwnd(self._scrcpy_proc)
@@ -1016,6 +1298,15 @@ class MainWindow(MSFluentWindow):
         """
         if not self.btn_scrcpy.isChecked():
             return  # 画面镜像已关闭，不自动拉起
+        if not window_is_foreground(self) or self.isMinimized():
+            if not self._background_mirror_paused:
+                self._background_mirror_paused = True
+                self._disable_scrcpy()
+            return
+        if self._background_mirror_paused:
+            self._background_mirror_paused = False
+            self._enable_scrcpy()
+            return
         if not SCRCPY.is_file() or self._embed_timer.isActive():
             return  # 没有 scrcpy 可拉，或启动/重嵌流程正在进行
         if self._scrcpy_proc is not None and self._scrcpy_proc.poll() is None:
@@ -1028,7 +1319,7 @@ class MainWindow(MSFluentWindow):
             return
         had_proc = self._scrcpy_proc is not None
         self.scrcpy_view.set_hwnd(None)
-        self._scrcpy_proc = start_scrcpy(self.emulator_mode)
+        self._scrcpy_proc = start_scrcpy()
         if self._scrcpy_proc:
             log('scrcpy 已重连' if had_proc else 'scrcpy 已启动')
             self._embed_tries = 0
@@ -1125,6 +1416,8 @@ class MainWindow(MSFluentWindow):
 
     def _refresh_stats(self) -> None:
         """刷新主页卡片：运行时间 + 宠物状态横排（状态缓存）+ 任务队列卡 + 各任务当日统计。"""
+        if not window_is_foreground(self) or self.isMinimized():
+            return  # 后台不反复读配置/统计文件和重绘，回到前台下一秒刷新。
         try:
             self._runtime_label.setText(self._run_time_prefix().strip())
             self._refresh_queue_card()
@@ -1197,7 +1490,8 @@ class MainWindow(MSFluentWindow):
         self.schedule_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.schedule_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         layout.addWidget(self.schedule_table, 1)
-        note = CaptionLabel('开关/执行间隔/启用时段可直接编辑（保存到 config.yaml，调度器下一轮生效）；'
+        note = CaptionLabel('点击执行间隔/启用时段后修改，回车或离开输入框结束编辑；开关点击切换'
+                            '（保存到 config.yaml，调度器下一轮生效）；'
                             '"下次执行"每秒刷新：调度器运行时显示精确时间，未运行时按配置推算；'
                             '学习/打工由主任务组统一调度，无固定间隔，下次执行显示"启动后判定"。')
         note.setWordWrap(True)
@@ -1316,7 +1610,7 @@ class MainWindow(MSFluentWindow):
             te.setEnabled(in_order)
             te.setToolTip('每日调度时间（HH:MM）')
             te.timeChanged.connect(lambda qt, k=key: self._save_schedule_time(k, qt))
-            return te
+            return ClickToEdit(te)
         if key in ('care', 'hire_friend', 'friend_care'):
             # 调度间隔（秒）：护理用 tasks.care.interval_seconds，好友护理/雇佣好友用场景值
             value = (getattr(cfg.tasks, key).interval_seconds if key == 'care'
@@ -1328,7 +1622,7 @@ class MainWindow(MSFluentWindow):
             spin.setEnabled(in_order)
             spin.setToolTip('调度间隔（秒）')
             spin.valueChanged.connect(lambda v, k=key: self._save_schedule_interval(k, v))
-            return spin
+            return ClickToEdit(spin)
         # 学习/打工：主任务组统一调度，无固定间隔
         label = BodyLabel('—')
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1347,7 +1641,7 @@ class MainWindow(MSFluentWindow):
         edit.setToolTip('启用时段：HH:MM-HH:MM 或 HH:MM:SS-HH:MM:SS，结束早于开始视为跨零点')
         edit.editingFinished.connect(
             lambda _e=edit, k=key: self._save_schedule_range(k, _e.text()))
-        return edit
+        return ClickToEdit(edit)
 
     # ---- 调度表格保存 ----
 
@@ -1614,10 +1908,9 @@ class MainWindow(MSFluentWindow):
         elif kind == 'devices' or isinstance(kind, list):
             if kind == 'devices':
                 # 设备序列号：可编辑下拉——既可从在线设备里选，也可手动输入
-                # （模拟器 127.0.0.1:7555 这类地址可能还没连进 adb，下拉里没有）
                 w = _NoInsertEditableComboBox()
                 w.setPlaceholderText('自动（第一台）或输入序列号，如 127.0.0.1:7555')
-                w.setToolTip('从下拉选择在线设备，或直接输入设备序列号/模拟器 adb 地址')
+                w.setToolTip('从下拉选择在线设备，或直接输入设备序列号/无线调试地址')
                 # 手动输入每敲一个字符就保存会反复重启 scrcpy/调度器，
                 # 只在 选了下拉项（activated）或 输入结束（Enter/失焦）时保存
                 w.activated.connect(lambda _i, k=key: self.save_field(k))
@@ -1672,8 +1965,6 @@ class MainWindow(MSFluentWindow):
             field_w = self._setting_widgets[key][0]
             if key in ('care.energy_threshold', 'care.clean_threshold'):
                 self._care_threshold_rows[key] = (form.labelForField(w), field_w)
-            if key in EMULATOR_SETTING_KEYS:
-                self._emulator_rows.append((form.labelForField(w), field_w))
         container.finalize()  # 字段已填完，按卡片实际高度平衡进两列
         return container, group_forms, group_cards
 
@@ -1699,14 +1990,6 @@ class MainWindow(MSFluentWindow):
     def _build_settings_page(self) -> QWidget:
         """设置页：连接/调度引擎/全局规则/告警等全局设置 + 关于与更新。"""
         container, group_forms, group_cards = self._build_settings_form(SETTING_FIELDS)
-        if not self.emulator_mode:
-            # 非模拟器版：模拟器相关设置用不上，整组隐藏（含全是模拟器字段的"模拟器"卡片）
-            for label, w in self._emulator_rows:
-                label.hide()
-                w.hide()
-            group_cards['模拟器'].hide()
-        else:
-            self._fill_emulator_placeholders()
         # 通知测试：按当前 config.yaml 的 notify 配置发一条测试告警。
         # 点击按钮会先让输入框失焦（失焦自动保存），未落盘的修改也会先生效；
         # 各渠道发送结果见日志页
@@ -1739,42 +2022,18 @@ class MainWindow(MSFluentWindow):
         update_layout.addWidget(update_btn)
         update_layout.addWidget(self._update_label, 1)
         about_form.addRow(BodyLabel('检查更新'), update_row)
+        close_actions = ['关闭程序', '最小化程序']
+        close_combo = ComboBox()
+        close_combo.addItems(close_actions)
+        close_combo.setToolTip('选择最小化时，点击右上角 × 后托管继续运行；Alt+F4 仍退出程序。')
+        self._setting_widgets['gui.close_action'] = (close_combo, close_actions)
+        close_combo.currentTextChanged.connect(lambda _: self.save_field('gui.close_action'))
+        about_form.addRow(BodyLabel('右上角关闭按钮'), close_combo)
         container.add_card(about_card)
         page = self._wrap_form_page(container)
         page.setObjectName('settingsPage')
         return page
 
-    def _fill_emulator_placeholders(self) -> None:
-        """实例名称/安装路径留空自动探测：占位符显示按当前设备序列号探测到的值。"""
-        try:
-            from src.emulator import find_instance
-
-            serial = load_config().adb.device_serial
-            inst = find_instance(serial) if serial else None
-            hint = f'自动探测：{inst.name}' if inst else '自动探测：未找到匹配实例'
-            for key, value in (('emulator.name', inst.name if inst else ''),
-                               ('emulator.path', str(inst.path) if inst else '')):
-                item = self._setting_widgets.get(key)
-                if not item:
-                    continue
-                w = item[0]
-                w.setPlaceholderText(f'自动探测：{value}' if value else hint)
-                # 上次自动填的值用户没动过：设备换了就作废旧值，跟随新探测结果
-                text = w.text().strip()
-                if text and text == self._emulator_autofill.get(key) and text != value:
-                    w.blockSignals(True)
-                    w.setText('')
-                    w.blockSignals(False)
-                    text = ''
-                # 字段留空且探测到实例时，把探测值直接填进输入框（初始化数据，
-                # 用户可再改；清空并失焦保存后恢复"留空自动探测"）
-                if value and not text:
-                    w.blockSignals(True)
-                    w.setText(value)
-                    w.blockSignals(False)
-                    self._emulator_autofill[key] = value
-        except Exception:
-            pass  # 占位符只是提示，探测失败不影响设置页
 
     def _on_tab_changed(self, index: int) -> None:
         """切到任务页或设置页时加载当前配置（按页面 objectName 判定，不依赖页序）。"""
@@ -1973,11 +2232,7 @@ class MainWindow(MSFluentWindow):
                 log(f'手动重启：按配置执行异常恢复（recover.method={cfg.recover.method}）...')
                 reenter_pet(
                     self._get_adb_dev(),
-                    method=cfg.recover.method,
-                    use_opener=self.emulator_mode,
-                    opener_serial=self.emulator_device,
-                    emulator_restart_cmd=cfg.recover.emulator_restart_cmd,
-                    emulator_cfg=cfg.emulator)
+                    method=cfg.recover.method)
                 ok = True
                 log('手动重启完成，已回宠物主页')
             except Exception as e:
@@ -1993,9 +2248,7 @@ class MainWindow(MSFluentWindow):
     def _on_recover_finished(self, recovered: bool) -> None:
         """手动重启结束（主线程）：恢复按钮可用；恢复完成后自动启动调度器。
 
-        恢复成功时宠物主页已由恢复流程打开（模拟器模式是 opener 注入打开的），
-        拉起调度器跳过其启动时的 opener 打开，避免一次手动重启开两次宠物主页；
-        恢复失败则照常让调度器自己用 opener 尝试。
+        恢复完成后启动调度，启动检查会确认宠物主页。
         """
         try:
             self._btn_manual_recover.setEnabled(True)
@@ -2003,7 +2256,7 @@ class MainWindow(MSFluentWindow):
             return
         self._recovering = False
         log('手动重启结束，启动调度器')
-        self.start_runner(skip_opener=recovered)
+        self.start_runner()
 
     def load_settings(self) -> None:
         try:
@@ -2040,48 +2293,21 @@ class MainWindow(MSFluentWindow):
         method_w, _ = self._setting_widgets.get('care.method', (None, None))
         if method_w is not None:
             self._on_care_method_changed(method_w.currentText())
-        # 模拟器字段的"自动探测"占位符按当前设备序列号刷新（改了序列号再进设置页能看到）
-        if self.emulator_mode:
-            self._fill_emulator_placeholders()
 
     def _fill_devices(self, combo: '_NoInsertEditableComboBox', current: str) -> None:
-        """枚举在线 adb 设备填充序列号下拉（可编辑，支持手动输入），
-        首项为 自动（第一台）。手动输入的序列号（不在线/模拟器地址）下拉里没有时写回编辑框。
-        另外合并自动扫描到的模拟器实例 serial（离线也列出，供模拟器模式直接选）；
-        命中实例的选项在序列号后标注实例名（如 127.0.0.1:5561（MuMuPlayer-12.0-3））；
-        在线但未命中实例的（真机）标注手机型号（ro.product.brand/model）。"""
+        """枚举在线手机并显示型号，允许手动填写无线调试地址。"""
         combo.clear()
         # 注意 fluent ComboBox.addItem 签名是 (text, icon=None, userData=None)：
         # userData 必须关键字传，位置传参会被当成 icon，data 全是 None（选啥都存成空）
         combo.addItem('自动（第一台）', userData='')
-        # 先扫模拟器实例：serial -> 实例显示名（在线设备命中也标注；emulator-* 与
-        # 127.0.0.1:port 对偶形态都算命中）
-        names: dict[str, str] = {}
-        scanned: list[str] = []
-        try:
-            from src.emulator import get_serial_pair, scan_instances
-
-            for inst in scan_instances():
-                for serial in inst.serials:
-                    scanned.append(serial)
-                    names.setdefault(serial, inst.name)
-                    names.setdefault(get_serial_pair(serial), inst.name)
-        except Exception as e:
-            log(f'扫描模拟器 serial 失败: {e}')
-
-        def _label(serial: str) -> str:
-            name = names.get(serial)
-            return f'{serial}（{name}）' if name else serial
-
         try:
             from src.adb.device import Device
             from src.config import find_adb
 
             dev = Device(find_adb(load_config().adb.path))
             for serial in dev.online_devices():
-                label = names.get(serial)
+                label = None
                 if label is None:
-                    # 未命中模拟器实例（真机）：读 ro.product.brand/model 显示手机型号
                     phone = Device(dev.adb, serial)
                     brand, model = (phone.getprop('ro.product.brand'),
                                     phone.getprop('ro.product.model'))
@@ -2091,9 +2317,6 @@ class MainWindow(MSFluentWindow):
                 combo.addItem(f'{serial}（{label}）' if label else serial, userData=serial)
         except Exception as e:
             log(f'枚举设备失败: {e}')
-        for serial in scanned:
-            if combo.findData(serial) < 0:
-                combo.addItem(_label(serial), userData=serial)
         idx = combo.findData(current)
         if idx >= 0:
             combo.setCurrentIndex(idx)
@@ -2164,29 +2387,12 @@ class MainWindow(MSFluentWindow):
             setTheme(THEME_MAP.get(str(fixed), Theme.AUTO))
         if key in ('adb.device_serial', 'adb.path'):
             # adb 连接相关：重拉 scrcpy，调度器也需要重启重建连接
-            if key == 'adb.device_serial' and self.emulator_mode:
-                # 序列号变更立即重新探测实例，刷新实例名称/安装路径的占位提示
-                self._fill_emulator_placeholders()
             self._restart_scrcpy()
             if self._runner_proc and self._runner_proc.poll() is None:
                 self._restart_timer.start()  # 防抖：连续修改多个字段只重启一次
         elif self._runner_proc and self._runner_proc.poll() is None:
             log('调度器每轮自动重读配置，最迟下一轮生效（无需重启）')
 
-    def _connect_emulator_adb(self) -> None:
-        """模拟器模式下，先确保 adb 已连接远程模拟器（127.0.0.1:port）。
-
-        模拟器（MuMu/雷电等）可能还没进 adb devices，不先 connect 的话
-        scrcpy/u2 都连不上；失败只记日志（可能本来就已连接）。
-        """
-        if not self.emulator_mode:
-            return
-        try:
-            serial = self.emulator_device or load_config().adb.device_serial
-            if serial and ':' in serial:
-                Device(find_adb(load_config().adb.path), serial).connect_remote(serial)
-        except Exception as e:
-            log(f'adb connect 模拟器失败: {e}')
 
     def _restart_scrcpy(self) -> None:
         """杀掉并重拉 scrcpy（换设备/换 adb 后画面也需要切换）。"""
@@ -2195,8 +2401,7 @@ class MainWindow(MSFluentWindow):
         log('重新初始化 scrcpy...')
         kill_our_scrcpy(self._scrcpy_proc)
         self.scrcpy_view.set_hwnd(None)
-        self._connect_emulator_adb()
-        self._scrcpy_proc = start_scrcpy(self.emulator_mode)
+        self._scrcpy_proc = start_scrcpy()
         if self._scrcpy_proc:
             self._embed_tries = 0
             self._embed_fail_logged = False
@@ -2220,9 +2425,16 @@ class MainWindow(MSFluentWindow):
 
     def _enable_scrcpy(self) -> None:
         """启动 scrcpy 并开始查找嵌入（看门狗随后自动维护重连）。"""
+        if self._background_mirror_paused:
+            return
         if self._screen_off_proc is not None and self._screen_off_proc.poll() is None:
             log('结束屏幕关闭 scrcpy')
             self._screen_off_proc.terminate()
+            try:
+                self._screen_off_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._screen_off_proc.kill()
+                self._screen_off_proc.wait(timeout=2)
         self._screen_off_proc = None
         if self._scrcpy_proc is not None and self._scrcpy_proc.poll() is None:
             # 已在运行：若之前嵌入超时没嵌上（窗口落在屏幕外），补挂嵌入轮询而不是干等
@@ -2231,8 +2443,7 @@ class MainWindow(MSFluentWindow):
                 self._embed_timer.start(500)
             return
         self.scrcpy_view.set_hwnd(None)
-        self._connect_emulator_adb()
-        self._scrcpy_proc = start_scrcpy(self.emulator_mode)
+        self._scrcpy_proc = start_scrcpy()
         if self._scrcpy_proc:
             self._embed_tries = 0
             self._embed_fail_logged = False
@@ -2245,8 +2456,8 @@ class MainWindow(MSFluentWindow):
         self._scrcpy_proc = None
         self.scrcpy_view.set_hwnd(None)
         # 镜像关闭：用无头 scrcpy 真正关掉设备屏幕（保持自动化可用）；
-        # 模拟器模式 start_scrcpy_screen_off 内部直接跳过
-        self._screen_off_proc = start_scrcpy_screen_off(self.emulator_mode)
+        if self._screen_off_proc is None or self._screen_off_proc.poll() is not None:
+            self._screen_off_proc = start_scrcpy_screen_off()
 
     def _restart_runner(self) -> None:
         if self._runner_proc and self._runner_proc.poll() is None:
@@ -2256,13 +2467,12 @@ class MainWindow(MSFluentWindow):
 
     # ---- 调度器控制：开始 = 启动子进程，停止 = 结束子进程 ----
 
-    def start_runner(self, skip_opener: bool = False) -> None:
-        """启动调度器子进程；skip_opener=True 时（手动重启刚恢复完，宠物主页已
-        打开）给 runner 传 --skip-opener，跳过模拟器模式启动时的 opener 打开。"""
+    def start_runner(self) -> None:
+        """以较低 CPU 优先级启动真机调度器子进程。"""
         if self._runner_proc and self._runner_proc.poll() is None:
             return
         log('启动调度器...')
-        env = dict(os.environ, PYTHONIOENCODING='utf-8')
+        env = dict(os.environ, PYTHONIOENCODING='utf-8', QQPET_PROFILE_ID=PROFILE_ID)
         # onefile 子进程默认复用父进程的 _MEI 解压目录（_MEIPASS2 环境变量），
         # 调度器快速杀拉/并发时可能把共享目录搞坏（表现为惰性导入的模块/资源
         # 突然"找不到"）；去掉后 runner 用自己的独立解压目录，互不影响
@@ -2271,16 +2481,6 @@ class MainWindow(MSFluentWindow):
             cmd = [sys.executable, '--runner']  # 打包后：以 --runner 参数重启自身
         else:
             cmd = [sys.executable, '-u', str(RUNNER_SCRIPT)]
-        if self.emulator_mode:
-            cmd.append('--emulator')
-        else:
-            cmd.append('--no-emulator')
-        if self.emulator_device:
-            cmd += ['--emulator-device', self.emulator_device]
-        # --skip-opener 只对模拟器模式有意义（跳过启动时 opener 打开）；
-        # 非模拟器模式 use_opener=False 本就不开 opener，不传避免无意义参数
-        if skip_opener and self.emulator_mode:
-            cmd.append('--skip-opener')
         self._runner_proc = subprocess.Popen(
             cmd,
             cwd=str(PROJECT_ROOT),
@@ -2290,7 +2490,7 @@ class MainWindow(MSFluentWindow):
             encoding='utf-8',
             errors='replace',
             env=env,
-            creationflags=_NO_WINDOW,
+            creationflags=_NO_WINDOW | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0),
         )
         threading.Thread(
             target=self._read_runner_logs, args=(self._runner_proc,), daemon=True
@@ -2300,7 +2500,17 @@ class MainWindow(MSFluentWindow):
     def stop_runner(self) -> None:
         if self._runner_proc and self._runner_proc.poll() is None:
             log('结束调度器进程')
-            self._runner_proc.terminate()
+            if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+                # onefile 包装进程还有实际 runner 子进程，切配置前一起停止。
+                subprocess.run(['taskkill', '/PID', str(self._runner_proc.pid), '/T', '/F'],
+                               creationflags=_NO_WINDOW, capture_output=True, timeout=10)
+            else:
+                self._runner_proc.terminate()
+            try:
+                self._runner_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._runner_proc.kill()
+                self._runner_proc.wait(timeout=5)
         self._runner_started_at = None
 
     def _read_runner_logs(self, proc: subprocess.Popen) -> None:
@@ -2339,21 +2549,30 @@ class MainWindow(MSFluentWindow):
 
     # ---- 退出 ----
 
+    def _on_title_close(self):
+        # 只重定向标题栏 ×，不拦截配置切换、Alt+F4 或正常退出的资源清理。
+        if load_config().gui.close_action == '最小化程序':
+            self.showMinimized()
+        else:
+            self.close()
+
     def closeEvent(self, event) -> None:
-        if self._runner_proc and self._runner_proc.poll() is None:
-            self._runner_proc.terminate()
+        self._restart_timer.stop()
+        self._scrcpy_watchdog.stop()
+        self._embed_timer.stop()
+        self.stop_runner()
         # 只结束由本程序拉起的 scrcpy
         if self._scrcpy_proc and self._scrcpy_proc.poll() is None:
             log('关闭 scrcpy')
-            self._scrcpy_proc.terminate()
+            kill_our_scrcpy(self._scrcpy_proc)
         if self._screen_off_proc and self._screen_off_proc.poll() is None:
             log('结束屏幕关闭 scrcpy')
-            self._screen_off_proc.terminate()
+            kill_our_scrcpy(self._screen_off_proc)
         event.accept()
 
 
-def _ensure_runtime_resources(emulator: bool) -> None:
-    """确保 scrcpy / 模拟器版 frida-server 已就位（缺失不阻塞，后台线程）。
+def _ensure_runtime_resources() -> None:
+    """确保 scrcpy 已就位（缺失不阻塞，后台线程）。
 
     源码运行：缺失时自动调用对应 fetch 工具下载（幂等），失败给出手动下载地址与放置位置。
     打包运行（frozen）：资源随包或放在 exe 旁 runs/（可写数据目录，覆盖随包资源）；缺失时提示
@@ -2362,14 +2581,13 @@ def _ensure_runtime_resources(emulator: bool) -> None:
     frozen = getattr(sys, 'frozen', False)
 
     def work() -> None:
-        # scrcpy：画面镜像必需（不区分普通/模拟器模式）
         if not SCRCPY.is_file():
             if frozen:
                 log(f'未找到 scrcpy。需要画面镜像请手动放置（或重新打包），exe 旁 runs 目录：'
                     f'{APP_ROOT / "runs" / "resources" / "scrcpy-win64"}/（内含 scrcpy.exe）')
             else:
                 log('未找到 scrcpy，正在自动下载（tools/fetch_scrcpy.py）...')
-                fetch = PROJECT_ROOT / 'tools' / 'fetch_scrcpy.py'
+                fetch = APP_ROOT / 'tools' / 'fetch_scrcpy.py'
                 if fetch.is_file():
                     subprocess.run([sys.executable, str(fetch)], check=False)
                 if SCRCPY.is_file():
@@ -2378,82 +2596,19 @@ def _ensure_runtime_resources(emulator: bool) -> None:
                     # 下载失败不阻塞：给出下载地址与放置位置，用户手动处理
                     log(f'scrcpy 自动下载失败。请手动下载 scrcpy win64 并解压到 {SCRCPY.parent}：\n'
                         f'  地址: https://github.com/Genymobile/scrcpy/releases （scrcpy-win64-vX.zip，需含 scrcpy.exe）')
-        # frida-server：模拟器模式需要
-        if emulator:
-            from src.opener import FRIDA_SERVER_REL
-            frida_dir = resource_path(FRIDA_SERVER_REL)
-            if not any(frida_dir.glob('frida-server-*.xz')):
-                if frozen:
-                    log(f'未找到 frida-server 离线包。需要模拟器功能请手动下载并放到 exe 旁 runs 目录：'
-                        f'{APP_ROOT / "runs" / FRIDA_SERVER_REL}/（frida-server-<版本>-android-x86_64.xz，'
-                        f'版本须与 requirements.txt 的 frida 一致），或重新打包模拟器版')
-                else:
-                    log('未找到 frida-server 离线包，正在自动下载（tools/fetch_frida_server.py）...')
-                    fetch = PROJECT_ROOT / 'tools' / 'fetch_frida_server.py'
-                    if fetch.is_file():
-                        subprocess.run([sys.executable, str(fetch)], check=False)
-                    if any(frida_dir.glob('frida-server-*.xz')):
-                        log('frida-server 离线包已就绪')
-                    else:
-                        # 下载失败不阻塞：给出下载地址与放置位置，用户手动处理
-                        try:
-                            import frida
-                            ver = frida.__version__
-                        except Exception:
-                            ver = '<版本>'
-                        log(f'frida-server 自动下载失败。请手动下载并放到 {frida_dir}：\n'
-                            f'  地址: https://github.com/frida/frida/releases/download/{ver}/'
-                            f'frida-server-{ver}-android-x86_64.xz\n'
-                            f'  （文件名中的版本须与 requirements.txt 的 frida 一致）')
-
     threading.Thread(target=work, daemon=True).start()
 
 
-def _parse_emulator_args() -> tuple[bool, str | None]:
-    """解析 --emulator / --no-emulator / --emulator-device。
-
-    未显式指定时：打包的模拟器版（内置 emulator_mode.txt 标记）默认开启，
-    普通版/源码默认关闭。返回 (是否模拟器模式, 模拟器设备地址或 None)。
-    """
-    emulator = is_emulator_build()
-    device = None
-    args = sys.argv[1:]
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        if arg == '--emulator':
-            emulator = True
-        elif arg == '--no-emulator':
-            emulator = False
-        elif arg == '--emulator-device' and i + 1 < len(args):
-            device = args[i + 1]
-            i += 1
-        i += 1
-    return emulator, device
 
 
-def _strip_emulator_args(argv: list[str]) -> list[str]:
-    """从 argv 里去掉 emulator 专用参数（QApplication 不认识的参数不报错，
-    但清理干净更稳妥）。"""
-    out = [argv[0]]
-    i = 1
-    while i < len(argv):
-        arg = argv[i]
-        if arg in ('--emulator', '--no-emulator', '--skip-opener'):
-            i += 1
-            continue
-        if arg == '--emulator-device':
-            i += 2  # 连后面的值一起去掉
-            continue
-        out.append(arg)
-        i += 1
-    return out
 
 
 def main() -> None:
-    emulator, emulator_device = _parse_emulator_args()
-    skip_opener = '--skip-opener' in sys.argv
-    if '--runner' in sys.argv:
+    import argparse
+    parser = argparse.ArgumentParser(description='QQ 宠物真机助手')
+    parser.add_argument('--runner', action='store_true', help='启动后台调度器')
+    args = parser.parse_args()
+    if args.runner:
         # 调度器子进程模式（打包后由 GUI 以 --runner 参数拉起）
         # windowed 打包的程序 stdout 用本地编码(GBK)，强制改 UTF-8，否则 GUI 日志乱码
         for stream in (sys.stdout, sys.stderr):
@@ -2466,16 +2621,23 @@ def main() -> None:
 
         # 与控制台入口一致：按 config.yaml 的 runner.engine 选调度引擎
         # （之前这里写死 legacy Runner，导致打包版不写 runs/queue_status.json）
-        run_scheduler(use_opener=emulator, opener_serial=emulator_device,
-                      skip_opener=skip_opener)
+        run_scheduler()
         return
-    _ensure_runtime_resources(emulator)
-    app = QApplication(_strip_emulator_args(sys.argv))
+    _ensure_runtime_resources()
+    app = QApplication(sys.argv)
     # 主题：跟随系统/深色/浅色（gui.theme 配置，默认跟随系统）
     setTheme(THEME_MAP.get(load_config().gui.theme, Theme.AUTO))
-    window = MainWindow(emulator_mode=emulator, emulator_device=emulator_device)
+    window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    next_profile = getattr(window, '_next_profile', None)
+    if next_profile:
+        env = dict(os.environ, QQPET_PROFILE_ID=next_profile,
+                   PYINSTALLER_RESET_ENVIRONMENT='1')
+        env.pop('_MEIPASS2', None)
+        cmd = [sys.executable] if getattr(sys, 'frozen', False) else [sys.executable, str(APP_ROOT / 'main.py')]
+        subprocess.Popen(cmd, cwd=str(APP_ROOT), env=env, creationflags=_NO_WINDOW)
+    sys.exit(code)
 
 
 if __name__ == '__main__':

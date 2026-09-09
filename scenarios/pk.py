@@ -206,7 +206,7 @@ class PKScenario(VisitScenario):
             return
         need = planned * PK_STAT_COST
         source = self.ensure_main_page()
-        care.toggle_status(source)
+        care.set_status_expanded(True, source)
         # 数值异步加载（刚展开可能只有账号/宠物名），重试读到体力/清洁为止
         status = care.read_status_ready()
         source = self.dev.hierarchy()
@@ -228,7 +228,7 @@ class PKScenario(VisitScenario):
             source = self.dev.hierarchy()
         if cared:
             source = care.exit_care_mode(source)
-        care.toggle_status(source)
+        care.set_status_expanded(False, source)
         log('PK 前状态检查完成，已收起宠物状态')
 
     @staticmethod

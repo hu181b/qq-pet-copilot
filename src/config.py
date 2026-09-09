@@ -12,7 +12,9 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import copy
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
@@ -26,9 +28,12 @@ def _app_root() -> Path:
 
 APP_ROOT = _app_root()
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", APP_ROOT))
-PROJECT_ROOT = APP_ROOT  # 兼容旧引用
+from .profiles import resolve_profile
 
-CONFIG_FILE = APP_ROOT / "config.yaml"
+PROFILE_ID, DATA_ROOT = resolve_profile(APP_ROOT)
+PROJECT_ROOT = DATA_ROOT  # 兼容数据文件引用；源码和共享资源仍使用 APP_ROOT
+
+CONFIG_FILE = DATA_ROOT / "config.yaml"
 
 
 def resource_path(rel: str | Path) -> Path:
@@ -36,7 +41,7 @@ def resource_path(rel: str | Path) -> Path:
 
     源码运行：项目根下（resources/ 等）存在则用，否则随包资源；
     打包运行：exe 旁的 runs/（可写数据目录）下放同名资源即可覆盖随包资源
-    （如 runs/resources/scrcpy-win64/、runs/resources/frida-server/），无需重新打包。
+    （如 runs/resources/scrcpy-win64/），无需重新打包。
     """
     rel = Path(rel)
     if rel.is_absolute():
@@ -65,18 +70,6 @@ class AdbConfig:
     device_serial: str = ""
 
 
-@dataclass
-class EmulatorConfig:
-    # 模拟器类型：auto 自动探测，或 src/emulator.py 的 EMULATOR_TYPES 之一
-    # （serial 匹配到多个实例时用于消歧，ALAS EmulatorInfo 同）
-    type: str = "auto"
-    # 实例名称（留空自动探测）
-    name: str = ""
-    # 模拟器安装路径（留空自动探测）
-    path: str = ""
-    # MuMu 机型伪装（opener ensure_device_spoof，需 Root）：改写 app 级机型映射
-    # 让 QQ 以真机身份运行；默认关闭，门禁 MMKV 补丁已翻转过的设备无需开启
-    device_spoof: bool = False
 
 
 @dataclass
@@ -254,11 +247,7 @@ class RunnerConfig:
 class RecoverConfig:
     # 异常恢复方式：重启设备（adb reboot，彻底）/ 重启游戏（只强停并重开 QQ，快）
     method: str = "重启设备"
-    # 模拟器重启命令（模拟器模式"重启设备"用）：MuMu 等模拟器不支持 adb reboot
-    # （会把 adb 服务卡死），配了该命令则改为执行它重启模拟器整机；留空自动探测
-    # MuMu 实例分步停/启（src/emulator.py），探测不到才回退 adb reboot。
-    # 例（MuMu 12）："D:/Netease/MuMu Player 12/shell/MuMuManager.exe" control -v 0 restart
-    emulator_restart_cmd: str = ""
+
 
 
 @dataclass
@@ -290,13 +279,14 @@ class GuiConfig:
     theme: str = "跟随系统"
     # 画面镜像开关（主页工具栏，开关状态持久化；仅 GUI 用）
     mirror: bool = True
+    # 仅右上角 × 的行为；配置切换和 Alt+F4 仍正常退出。
+    close_action: str = "关闭程序"
 
 
 @dataclass
 class Config:
     adb: AdbConfig = field(default_factory=AdbConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
-    emulator: EmulatorConfig = field(default_factory=EmulatorConfig)
     gui: GuiConfig = field(default_factory=GuiConfig)
     school: SchoolConfig = field(default_factory=SchoolConfig)
     work: WorkConfig = field(default_factory=WorkConfig)
@@ -340,6 +330,13 @@ def find_adb(configured_path: str = "") -> str:
     )
 
 
+@lru_cache(maxsize=4)
+def _read_config_cached(path: str, mtime_ns: int, size: int, inode: int) -> dict:
+    """按文件版本缓存解析结果；每次调用仍返回独立配置，热更新不受影响。"""
+    with open(path, encoding='utf-8') as f:
+        return yaml.safe_load(f) or {}
+
+
 def load_config(config_path: str | Path | None = None) -> Config:
     path = Path(config_path) if config_path else CONFIG_FILE
     if not path.is_file():
@@ -349,8 +346,9 @@ def load_config(config_path: str | Path | None = None) -> Config:
             if bundled.is_file() and bundled.resolve() != path.resolve():
                 shutil.copy(bundled, path)
                 break
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    stat = path.stat()
+    raw = copy.deepcopy(_read_config_cached(str(path.resolve()), stat.st_mtime_ns,
+                                            stat.st_size, stat.st_ino))
     raw_tasks = raw.get("tasks", {}) or {}
     tasks = TasksConfig()
     if raw_tasks.get("order"):
@@ -374,8 +372,6 @@ def load_config(config_path: str | Path | None = None) -> Config:
         control=ControlConfig(
             **{k: v for k, v in (raw.get("control", {}) or {}).items()
                if k in ControlConfig.__dataclass_fields__}),
-        emulator=EmulatorConfig(**{k: v for k, v in (raw.get("emulator", {}) or {}).items()
-                                   if k in EmulatorConfig.__dataclass_fields__}),
         gui=GuiConfig(**{k: v for k, v in (raw.get("gui", {}) or {}).items()
                          if k in GuiConfig.__dataclass_fields__}),
         school=SchoolConfig(**raw.get("school", {})),
@@ -393,17 +389,6 @@ def load_config(config_path: str | Path | None = None) -> Config:
         runner=RunnerConfig(**{k: v for k, v in (raw.get("runner", {}) or {}).items()
                                if k in RunnerConfig.__dataclass_fields__}),
         tasks=tasks,
-        recover=RecoverConfig(**raw.get("recover", {})),
+        recover=RecoverConfig(**{k: v for k, v in raw.get("recover", {}).items() if k in RecoverConfig.__dataclass_fields__}),
         notify=NotifyConfig(**raw.get("notify", {})),
     )
-
-
-def is_emulator_build() -> bool:
-    """是否为打包的模拟器版（build.py --emulator 内置 emulator_mode.txt 标记）。
-
-    模拟器版 exe 启动后默认开启模拟器模式（opener 一次性初始化 + am start 直开宠物主页）；
-    普通版/源码运行时为 False，可用 --emulator / --no-emulator 命令行参数覆盖。
-    """
-    if not getattr(sys, "frozen", False):
-        return False
-    return (RESOURCE_ROOT / "emulator_mode.txt").is_file()
