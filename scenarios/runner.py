@@ -944,10 +944,16 @@ class TaskQueueRunner(Runner):
                     self._bad_task_keys = getattr(self, '_bad_task_keys', set()) | {key}
                     log(f'tasks.order 中未知任务名: {key!r}，已忽略（可选: {"/".join(TASK_KEYS)}）')
                 continue
-            new_order.append(key)
+            if key not in new_order:
+                new_order.append(key)
         if not new_order:
             log('tasks.order 为空或全部无效，使用默认顺序')
             new_order = list(TASK_KEYS)
+        # Removed main tasks must not remain candidates and block the new order.
+        # Running activities retain their pending state on the scenario itself.
+        for key in list(tasks):
+            if key not in new_order:
+                del tasks[key]
         for key in new_order:
             task = tasks.get(key)
             if task is None:
@@ -1412,7 +1418,7 @@ class TaskQueueRunner(Runner):
                 return False
             at = min(future)
             log(f'主任务组当天已结束，还有支线任务等待到 {at:%H:%M}，调度器等待')
-            time.sleep(max(1.0, (at - now).total_seconds()))
+            time.sleep(min(QUEUE_POLL_INTERVAL, max(1.0, (at - now).total_seconds())))
             return True
         future = []
         for key in order:

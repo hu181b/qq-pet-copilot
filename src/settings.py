@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from io import StringIO
 
 import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString, LiteralScalarString
 
 from .config import CONFIG_FILE, MAIN_TASK_KEYS, TASK_KEYS
+from .atomic_file import atomic_write_text
 
 _yaml = YAML()  # 默认 round-trip，保留注释
 
@@ -121,7 +123,10 @@ def validate_field(key: str, value):
             return True, '>'.join(keys)
         return False, default
     if key in ('care.energy_threshold', 'care.clean_threshold'):
-        return (True, value) if 0 <= int(value) <= 100 else (False, default)
+        try:
+            return (True, value) if 0 <= int(value) <= 100 else (False, default)
+        except (TypeError, ValueError, OverflowError):
+            return False, default
     if key == 'schedule.back_method':
         return (True, value) if value in ('返回图标', '系统返回') else (False, default)
     if key == 'tasks.failure_interval':
@@ -178,8 +183,9 @@ def load_raw():
 
 def save_raw(data) -> None:
     """写回 config.yaml（保留原有注释和格式）。"""
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        _yaml.dump(data, f)
+    stream = StringIO()
+    _yaml.dump(data, stream)
+    atomic_write_text(CONFIG_FILE, stream.getvalue())
 
 
 def get_value(data, dotted_key: str, default=None):

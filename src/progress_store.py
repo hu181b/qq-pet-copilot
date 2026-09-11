@@ -24,6 +24,7 @@ import time
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable
+from .atomic_file import atomic_write_text
 
 _log: Callable[[str], None] = lambda msg: None
 
@@ -41,7 +42,7 @@ def today_str() -> str:
 def to_int(value) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -63,18 +64,20 @@ def read_raw(path: Path) -> dict:
     """读进度文件为 dict；文件不存在/JSON 损坏返回 {}（损坏先备份）。"""
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        if not isinstance(data, dict):
+            raise ValueError('进度文件必须为 JSON 对象')
+        return data
+    except ValueError:
         _backup_corrupted(path)
+        return {}
+    except OSError:
+        # A transient read failure is not evidence that saved progress is corrupt.
         return {}
 
 
 def write_raw(path: Path, data: dict) -> None:
     """原子写入：先写 <文件>.tmp 再 os.replace 覆盖（避免写一半被杀留损坏文件）。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + '.tmp')
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.replace(str(tmp), str(path))
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def normalize(data: dict) -> tuple[dict, bool]:

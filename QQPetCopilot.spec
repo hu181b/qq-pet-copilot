@@ -9,6 +9,7 @@ EXE_NAME = 'QQPetCopilot'
 
 # 便携发行必须包含运行资源，不能静默生成需要下载补全的 EXE。
 _required = [
+    'resources/app-icon.ico',
     'resources/scrcpy-win64/scrcpy.exe',
     'resources/scrcpy-win64/adb.exe',
     'resources/scrcpy-win64/AdbWinApi.dll',
@@ -23,6 +24,7 @@ if _missing:
     raise RuntimeError('便携版缺少运行资源，请先运行 tools/fetch_*：' + ', '.join(_missing))
 
 datas = [('config.example.yaml', '.')]
+datas.append(('resources/app-icon.ico', 'resources'))
 # resources/scrcpy-win64/ 不入库（tools/fetch_scrcpy.py 拉取），存在才随包带上
 if Path('resources/scrcpy-win64/scrcpy.exe').is_file():
     datas.append(('resources/scrcpy-win64', 'resources/scrcpy-win64'))
@@ -105,7 +107,7 @@ if os.environ.get('QQ_PET_ONEDIR'):
               debug=False, bootloader_ignore_signals=False, strip=False, upx=True,
               upx_exclude=[], console=False, disable_windowed_traceback=False,
               argv_emulation=False, target_arch=None, codesign_identity=None,
-              entitlements_file=None)
+              entitlements_file=None, icon='resources/app-icon.ico')
     coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=True,
                    upx_exclude=[], name=EXE_NAME)
 else:
@@ -115,4 +117,4 @@ else:
               strip=False, upx=True, upx_exclude=[], runtime_tmpdir=None,
               console=False, disable_windowed_traceback=False,
               argv_emulation=False, target_arch=None, codesign_identity=None,
-              entitlements_file=None)
+              entitlements_file=None, icon='resources/app-icon.ico')

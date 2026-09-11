@@ -22,6 +22,7 @@ import time
 
 from .config import PROJECT_ROOT
 from .progress import log
+from .atomic_file import atomic_write_text
 
 STATUS_CACHE_FILE = PROJECT_ROOT / 'runs' / 'status_cache.json'
 
@@ -42,6 +43,8 @@ def _load() -> dict:
     try:
         data = json.loads(STATUS_CACHE_FILE.read_text(encoding='utf-8'))
         if isinstance(data, dict) and isinstance(data.get('accounts'), dict):
+            data['accounts'] = {key: entry for key, entry in data['accounts'].items()
+                                if isinstance(entry, dict)}
             return data
     except (OSError, ValueError):
         pass
@@ -55,9 +58,8 @@ def load_accounts() -> dict[str, dict]:
 
 def _save(data: dict) -> None:
     try:
-        STATUS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATUS_CACHE_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        atomic_write_text(STATUS_CACHE_FILE,
+                          json.dumps(data, ensure_ascii=False, indent=2))
     except OSError as e:
         log(f'状态缓存写入失败: {e}')
 

@@ -21,3 +21,10 @@ profiles.json
 _release_stage/
 release_notes.md
 *.zip
+
+# Only the application icon is source-controlled under resources.
+!resources/
+resources/*
+!resources/app-icon.svg
+!resources/app-icon.ico
+!resources/app-icon.png

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTime, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
+    QMessageBox,
     QSizePolicy,
     QSizeGrip,
     QTableWidgetItem,
@@ -791,6 +792,7 @@ class MainWindow(MSFluentWindow):
 
     def __init__(self):
         super().__init__()
+        self.setWindowIcon(QIcon(str(resource_path('resources/app-icon.ico'))))
         self._next_profile = None
         old_navigation = self.navigationInterface
         self.hBoxLayout.removeWidget(old_navigation)
@@ -1060,7 +1062,14 @@ class MainWindow(MSFluentWindow):
         self.profile_combo.setCurrentIndex(self.profile_combo.findData(selected))
 
     def _profile_error(self, error):
-        MessageBox('配置管理', str(error), self).exec()
+        # 独立模态窗口避免与 scrcpy 原生子窗口叠放；关闭不依赖遮罩动画。
+        box = QMessageBox(QMessageBox.Icon.Information, '配置管理', str(error),
+                          QMessageBox.StandardButton.Ok, self)
+        box.button(QMessageBox.StandardButton.Ok).setText('知道了')
+        try:
+            box.exec()
+        finally:
+            box.deleteLater()
 
     def _new_profile(self):
         name, ok = QInputDialog.getText(self, '新建配置', '自定义名称（复制当前设置，统计从零开始）：')
@@ -2624,7 +2633,11 @@ def main() -> None:
         run_scheduler()
         return
     _ensure_runtime_resources()
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('QQPetCopilot.Desktop')
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(resource_path('resources/app-icon.ico'))))
     # 主题：跟随系统/深色/浅色（gui.theme 配置，默认跟随系统）
     setTheme(THEME_MAP.get(load_config().gui.theme, Theme.AUTO))
     window = MainWindow()

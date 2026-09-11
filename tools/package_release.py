@@ -34,6 +34,6 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('--exe', type=Path, default=Path('dist/QQPetCopilot.exe'))
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--tag', default='v1.0')
+    p.add_argument('--tag', default='v1.3')
     args = p.parse_args()
     package(args.exe, args.output, args.tag)

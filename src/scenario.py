@@ -590,7 +590,9 @@ class DeviceScenario:
                     # 可以直接点活动入口，省一次 back + 出门（见 adventure.run）
                     self._after_pending_go_out_at = time.monotonic()
                 else:
-                    log(f"{pend['desc']}: 未找到 quit 按钮，直接返回")
+                    log(f"{pend['desc']}: 未找到 quit 按钮，保留收尾任务稍后重试")
+                    pend['until'] = datetime.now() + timedelta(seconds=DEFER_FALLBACK_SECONDS)
+                    return False
                 self.pending = None
                 pend['on_finish']()
                 return True

@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag (for example v1.0)
+        description: Existing release tag (for example v1.3)
         required: true
         type: string
 permissions:
@@ -29,14 +29,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/fetch_scrcpy.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/fetch_minitouch.py --arch arm64-v8a
+          python tools/fetch_minitouch.py --arch arm64-v8a armeabi-v7a
       - name: Two offline test rounds
         env:
           PYTHONIOENCODING: utf-8
           QT_QPA_PLATFORM: offscreen
+          OPENBLAS_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+          MKL_NUM_THREADS: '1'
         run: |
           foreach ($round in 1,2) {
-            foreach ($suite in 'test_full_regression','test_profiles','test_school_navigation','test_window_behavior') {
+            $env:TEST_WIDTH = if ($round -eq 1) { '1080' } else { '720' }
+            foreach ($suite in 'test_full_regression','test_profiles','test_school_navigation','test_window_behavior','test_review_regression','test_profile_dialog') {
               python "tools/$suite.py"
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }

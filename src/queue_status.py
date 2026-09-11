@@ -13,10 +13,10 @@ runs/queue_status.json:
 from __future__ import annotations
 
 import json
-import os
 import time
 
 from .config import PROJECT_ROOT
+from .atomic_file import atomic_write_text
 
 QUEUE_STATUS_FILE = PROJECT_ROOT / 'runs' / 'queue_status.json'
 _last_write = None
@@ -34,11 +34,7 @@ def save_queue_status(state: dict) -> None:
         if (_last_write is not None and _last_write[:2] == (path,key)
                 and now - _last_write[2] < 30 and path.is_file()):
             return
-        QUEUE_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + '.tmp')
-        tmp.write_text(
-            json.dumps(state, ensure_ascii=False), encoding='utf-8')
-        os.replace(tmp,path)
+        atomic_write_text(path, json.dumps(state, ensure_ascii=False))
         _last_write = (path,key,now)
     except OSError:
         pass

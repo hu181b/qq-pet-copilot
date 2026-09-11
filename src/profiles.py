@@ -7,6 +7,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
+from .atomic_file import atomic_write_text
 
 
 class ProfileStore:
@@ -18,7 +19,13 @@ class ProfileStore:
         if not self.file.exists():
             return {'active': 'default', 'profiles': {'default': '默认配置'}}
         data = json.loads(self.file.read_text(encoding='utf-8'))
-        if 'default' not in data['profiles'] or data['active'] not in data['profiles']:
+        if (not isinstance(data, dict)
+                or not isinstance(data.get('profiles'), dict)
+                or not isinstance(data.get('active'), str)
+                or 'default' not in data['profiles']
+                or data['active'] not in data['profiles']
+                or any(not isinstance(name, str) or not name.strip()
+                       for name in data['profiles'].values())):
             raise ValueError('配置目录索引无效，请检查 profiles.json')
         for key in data['profiles']:
             self.directory(key)
@@ -27,14 +34,12 @@ class ProfileStore:
     def directory(self, key):
         if key == 'default':
             return self.root
-        if not re.fullmatch(r'[0-9a-f]{32}', key):
+        if not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{32}', key):
             raise ValueError('无效配置编号')
         return self.root / 'profiles' / key
 
     def save(self, data):
-        tmp = self.file.with_suffix('.tmp')
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-        os.replace(tmp, self.file)
+        atomic_write_text(self.file, json.dumps(data, ensure_ascii=False, indent=2))
 
     def _name(self, data, name, except_id=None):
         name = name.strip()
