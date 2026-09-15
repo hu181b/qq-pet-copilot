@@ -14,17 +14,11 @@ xml/
 config.yaml
 
 # 第三方二进制/离线包（scrcpy、frida-server 等），build 时下载或本地放入，不入库
-resources/
+resources/*
+!resources/moneybag-friend.png
 profiles/
 profiles.json
 .pyinstaller-cache/
 _release_stage/
 release_notes.md
 *.zip
-
-# Only the application icon is source-controlled under resources.
-!resources/
-resources/*
-!resources/app-icon.svg
-!resources/app-icon.ico
-!resources/app-icon.png

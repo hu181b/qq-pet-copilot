@@ -40,7 +40,7 @@ jobs:
         run: |
           foreach ($round in 1,2) {
             $env:TEST_WIDTH = if ($round -eq 1) { '1080' } else { '720' }
-            foreach ($suite in 'test_full_regression','test_profiles','test_school_navigation','test_window_behavior','test_review_regression','test_profile_dialog') {
+            foreach ($suite in 'test_full_regression','test_profiles','test_school_navigation','test_window_behavior','test_review_regression','test_profile_dialog','test_runner_shutdown','test_moneybag','test_recommendation_scope') {
               python "tools/$suite.py"
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }

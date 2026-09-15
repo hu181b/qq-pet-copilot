@@ -41,6 +41,7 @@ class Device:
             cmd += ["-s", self.serial]
         cmd += list(args)
         proc = subprocess.run(cmd, capture_output=True, timeout=60,
+                              stdin=subprocess.DEVNULL,
                               creationflags=_NO_WINDOW)
         if check and proc.returncode != 0:
             raise AdbError(
@@ -54,6 +55,7 @@ class Device:
         """返回在线设备序列号列表（不依赖 self.serial）。"""
         proc = subprocess.run(
             [self.adb, "devices"], capture_output=True, timeout=30, check=True,
+            stdin=subprocess.DEVNULL,
             creationflags=_NO_WINDOW,
         )
         serials = []
@@ -87,6 +89,7 @@ class Device:
         if not target or ":" not in target:
             return
         subprocess.run([self.adb, "connect", target], capture_output=True, timeout=10,
+                       stdin=subprocess.DEVNULL,
                        creationflags=_NO_WINDOW, check=False)
 
     def getprop(self, name: str) -> str:

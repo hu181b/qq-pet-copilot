@@ -10,6 +10,7 @@ EXE_NAME = 'QQPetCopilot'
 # 便携发行必须包含运行资源，不能静默生成需要下载补全的 EXE。
 _required = [
     'resources/app-icon.ico',
+    'resources/moneybag-friend.png',
     'resources/scrcpy-win64/scrcpy.exe',
     'resources/scrcpy-win64/adb.exe',
     'resources/scrcpy-win64/AdbWinApi.dll',
@@ -25,6 +26,7 @@ if _missing:
 
 datas = [('config.example.yaml', '.')]
 datas.append(('resources/app-icon.ico', 'resources'))
+datas.append(('resources/moneybag-friend.png', 'resources'))
 # resources/scrcpy-win64/ 不入库（tools/fetch_scrcpy.py 拉取），存在才随包带上
 if Path('resources/scrcpy-win64/scrcpy.exe').is_file():
     datas.append(('resources/scrcpy-win64', 'resources/scrcpy-win64'))

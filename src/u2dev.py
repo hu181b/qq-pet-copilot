@@ -470,6 +470,7 @@ class MiniTouchSession:
             cmd += ['-s', adb.serial]
         cmd += list(args)
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                              stdin=subprocess.DEVNULL,
                               errors='replace', timeout=timeout,
                               creationflags=subprocess.CREATE_NO_WINDOW)
         if check and proc.returncode != 0:
@@ -491,7 +492,9 @@ class MiniTouchSession:
             fetch = APP_ROOT / 'tools' / 'fetch_minitouch.py'
             if fetch.is_file():
                 log(f'未找到 minitouch 二进制，正在下载（tools/fetch_minitouch.py --arch {abi}）...')
-                subprocess.run([sys.executable, str(fetch), '--arch', abi], check=False, timeout=300)
+                subprocess.run([sys.executable, str(fetch), '--arch', abi], check=False, timeout=300,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
             path = resource_path(rel)
         if not path.is_file():
             raise RuntimeError(

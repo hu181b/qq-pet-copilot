@@ -133,6 +133,7 @@ def parse_hhmm(value, field: str):
 
 class Runner:
     def __init__(self):
+        self._moneybag_next = 0.0
         # 启动时就加载 OCR 引擎（模型加载要几秒，避免第一轮调度才卡）
         log('加载 OCR 引擎...')
         get_engine()
@@ -549,6 +550,18 @@ class Runner:
             log(f'{e}，沿用旧值')
 
 
+    def _try_moneybags(self) -> bool:
+        # Optional, low-frequency work. Never trigger game/device recovery for it.
+        from src.moneybag import MoneyBagCollector, INTERVAL
+        if not hasattr(self, '_moneybag_next') or time.monotonic() < self._moneybag_next:
+            return False
+        self._moneybag_next = time.monotonic() + INTERVAL
+        try:
+            return bool(MoneyBagCollector(self.school.dev).run())
+        except Exception as exc:
+            log(f'成长福袋巡检暂停：{exc}；稍后再检查')
+            return False
+
     def _ensure_pet_page_or_relaunch(self) -> None:
         '''真机启动检查：识别不到宠物主页面时，不在当前页面按 back（可能根本不在游戏里，
         back 无意义甚至误退出别的 App），直接走"重启游戏"分支：强停 QQ -> 启动 QQ ->
@@ -603,6 +616,8 @@ class Runner:
                 if self.care_due():
                     self.care.check_and_care()
                     self.care.last_care_at = datetime.now()
+
+                self._try_moneybags()
 
                 # 被雇佣时间段内主任务（冒险/学习/打工/雇佣好友）不触发
                 suppress_main = self.employed_window_active()
@@ -1193,6 +1208,13 @@ class TaskQueueRunner(Runner):
             return True
         if pend_act == 'wait':
             return False  # 本轮不执行任务 -> _sleep_until_next 睡到收尾点
+        # 成长福袋不受踩踩配额影响；学习/打工一分钟内要收尾时让路。
+        pend = self._main_pending_scen()
+        care = tasks.get('care')
+        care_ready = care is not None and self._eligible(care, now) and self.care_due()
+        if not care_ready and (pend is None or (pend.pending['until']-now).total_seconds() > 60):
+            if self._try_moneybags():
+                return True
         ctx: dict = {}  # 本轮循环的 点数/金币 缓存（_main_due 用）
         for key in order:
             task = tasks[key]

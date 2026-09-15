@@ -16,6 +16,7 @@ def _adb_run(adb: str, serial: str | None, *args: str,
         cmd += ['-s', serial]
     cmd += list(args)
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                          stdin=subprocess.DEVNULL,
                           errors='replace', timeout=timeout, creationflags=_NO_WINDOW)
     if check and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()

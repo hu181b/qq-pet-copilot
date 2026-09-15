@@ -422,6 +422,7 @@ def _kill_scrcpy_by_marker(marker: str) -> None:
     env = dict(os.environ, QQPET_SCRCPY_MARKER=marker)
     subprocess.run(
         ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+        stdin=subprocess.DEVNULL,
         capture_output=True, timeout=20, creationflags=_NO_WINDOW, env=env,
     )
 
@@ -523,6 +524,7 @@ def start_scrcpy() -> subprocess.Popen | None:
     proc = subprocess.Popen(
         cmd,
         cwd=str(SCRCPY.parent),  # scrcpy 需要同目录的 scrcpy-server 等文件
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=_NO_WINDOW,
@@ -556,6 +558,7 @@ def start_scrcpy_screen_off() -> subprocess.Popen | None:
     proc = subprocess.Popen(
         cmd,
         cwd=str(SCRCPY.parent),
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=_NO_WINDOW,
@@ -2230,7 +2233,12 @@ class MainWindow(MSFluentWindow):
         self.btn_stop.setEnabled(False)
         if self._runner_proc and self._runner_proc.poll() is None:
             log('手动重启：先停止调度器')
-            self.stop_runner()
+            if not self.stop_runner():
+                self._recovering = False
+                self._btn_manual_recover.setEnabled(True)
+                self.btn_stop.setEnabled(True)
+                log('手动重启已取消：调度器尚未停止')
+                return
 
         def work() -> None:
             ok = False
@@ -2471,8 +2479,8 @@ class MainWindow(MSFluentWindow):
     def _restart_runner(self) -> None:
         if self._runner_proc and self._runner_proc.poll() is None:
             log('重启调度器使配置即时生效...')
-            self.stop_runner()
-            QTimer.singleShot(500, self.start_runner)
+            if self.stop_runner():
+                QTimer.singleShot(500, self.start_runner)
 
     # ---- 调度器控制：开始 = 启动子进程，停止 = 结束子进程 ----
 
@@ -2482,17 +2490,19 @@ class MainWindow(MSFluentWindow):
             return
         log('启动调度器...')
         env = dict(os.environ, PYTHONIOENCODING='utf-8', QQPET_PROFILE_ID=PROFILE_ID)
-        # onefile 子进程默认复用父进程的 _MEI 解压目录（_MEIPASS2 环境变量），
-        # 调度器快速杀拉/并发时可能把共享目录搞坏（表现为惰性导入的模块/资源
-        # 突然"找不到"）；去掉后 runner 用自己的独立解压目录，互不影响
+        # 新版 PyInstaller 用 RESET_ENVIRONMENT 创建独立 onefile 生命周期；
+        # 只删除旧版 _MEIPASS2 不足以隔离 GUI 和 runner 的解压目录。
         env.pop('_MEIPASS2', None)
         if getattr(sys, 'frozen', False):
+            env['PYINSTALLER_RESET_ENVIRONMENT'] = '1'
             cmd = [sys.executable, '--runner']  # 打包后：以 --runner 参数重启自身
         else:
             cmd = [sys.executable, '-u', str(RUNNER_SCRIPT)]
         self._runner_proc = subprocess.Popen(
             cmd,
             cwd=str(PROJECT_ROOT),
+            # GUI 没有可依赖的控制台输入句柄，连续启停后尤其不能继承它。
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -2506,21 +2516,35 @@ class MainWindow(MSFluentWindow):
         ).start()
         self._runner_started_at = time.monotonic()
 
-    def stop_runner(self) -> None:
-        if self._runner_proc and self._runner_proc.poll() is None:
-            log('结束调度器进程')
-            if sys.platform == 'win32' and getattr(sys, 'frozen', False):
-                # onefile 包装进程还有实际 runner 子进程，切配置前一起停止。
-                subprocess.run(['taskkill', '/PID', str(self._runner_proc.pid), '/T', '/F'],
-                               creationflags=_NO_WINDOW, capture_output=True, timeout=10)
-            else:
-                self._runner_proc.terminate()
-            try:
-                self._runner_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._runner_proc.kill()
-                self._runner_proc.wait(timeout=5)
+    def stop_runner(self) -> bool:
+        """停止并核实退出；失败保留进程引用，不从 Qt 回调抛出异常。"""
+        proc = self._runner_proc
+        try:
+            if proc is not None and proc.poll() is None:
+                log('结束调度器进程')
+                if sys.platform == 'win32':
+                    # 源码/onefile 都可能有子进程；不以单独 kill 包装进程冒充停止。
+                    from pathlib import Path
+                    taskkill = str(Path(os.environ.get('SystemRoot', r'C:\Windows'))
+                                   / 'System32' / 'taskkill.exe')
+                    result = subprocess.run(
+                        [taskkill, '/PID', str(proc.pid), '/T', '/F'],
+                        stdin=subprocess.DEVNULL, capture_output=True,
+                        creationflags=_NO_WINDOW, timeout=10)
+                    if result.returncode and proc.poll() is None:
+                        detail = (result.stderr or result.stdout).decode('mbcs', errors='replace').strip()
+                        raise RuntimeError(f'停止进程树失败（{result.returncode}）：{detail}')
+                else:
+                    proc.terminate()
+                proc.wait(timeout=5)
+                if proc.poll() is None:
+                    raise RuntimeError('调度器尚未退出')
+        except Exception:
+            import traceback
+            log(f'停止调度失败，已保留进程状态，请重试；不能切换配置或启动恢复。\n{traceback.format_exc()}')
+            return False
         self._runner_started_at = None
+        return True
 
     def _read_runner_logs(self, proc: subprocess.Popen) -> None:
         """把调度器子进程的输出逐行送入日志队列。"""
@@ -2566,10 +2590,12 @@ class MainWindow(MSFluentWindow):
             self.close()
 
     def closeEvent(self, event) -> None:
+        if not self.stop_runner():
+            event.ignore()
+            return
         self._restart_timer.stop()
         self._scrcpy_watchdog.stop()
         self._embed_timer.stop()
-        self.stop_runner()
         # 只结束由本程序拉起的 scrcpy
         if self._scrcpy_proc and self._scrcpy_proc.poll() is None:
             log('关闭 scrcpy')
@@ -2598,7 +2624,9 @@ def _ensure_runtime_resources() -> None:
                 log('未找到 scrcpy，正在自动下载（tools/fetch_scrcpy.py）...')
                 fetch = APP_ROOT / 'tools' / 'fetch_scrcpy.py'
                 if fetch.is_file():
-                    subprocess.run([sys.executable, str(fetch)], check=False)
+                    subprocess.run([sys.executable, str(fetch)], check=False,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
                 if SCRCPY.is_file():
                     log('scrcpy 已就绪')
                 else:
@@ -2632,6 +2660,8 @@ def main() -> None:
         # （之前这里写死 legacy Runner，导致打包版不写 runs/queue_status.json）
         run_scheduler()
         return
+    from src.gui_diagnostics import install_gui_diagnostics
+    install_gui_diagnostics(PROJECT_ROOT / 'runs' / 'logs', log)
     _ensure_runtime_resources()
     if sys.platform == 'win32':
         import ctypes
@@ -2649,7 +2679,9 @@ def main() -> None:
                    PYINSTALLER_RESET_ENVIRONMENT='1')
         env.pop('_MEIPASS2', None)
         cmd = [sys.executable] if getattr(sys, 'frozen', False) else [sys.executable, str(APP_ROOT / 'main.py')]
-        subprocess.Popen(cmd, cwd=str(APP_ROOT), env=env, creationflags=_NO_WINDOW)
+        subprocess.Popen(cmd, cwd=str(APP_ROOT), env=env, creationflags=_NO_WINDOW,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
     sys.exit(code)
 
 
