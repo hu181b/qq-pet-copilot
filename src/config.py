@@ -93,7 +93,7 @@ class WorkConfig:
     location: str = "风铃旅社"
     # 打工时长选择：10分钟（select_box_1）/ 45分钟（select_box_2）/ 2小时（select_box_3），
     # 打工与雇佣好友共用
-    duration: str = "45分钟"
+    duration: str = "10分钟"
     # 每天打工次数上限，0 为不限
     times_per_day: int = 0
     # 已不再使用：旧流程"下滑找雇佣按钮"已移除（当前页没有雇佣按钮时直接关闭面板开工），
@@ -133,7 +133,7 @@ class AdventureConfig:
     # 冒险调度时间（HH:MM），到达后优先冒险
     start_time: str = "08:00"
     # 开始冒险后检测冒险详情框：出现"天色不对"就点召回->确认召回，计入一次冒险
-    skip_bad_weather: bool = False
+    skip_bad_weather: bool = True
     # 一轮连跑的冒险次数（跑满后回主页面）
     batch: int = 12
 
@@ -141,7 +141,7 @@ class AdventureConfig:
 @dataclass
 class CareConfig:
     # 护理方式：ocr检测（读宠物状态，低于阈值手动喂食/洗澡）/ 一键护理（直接点主页面的一键护理按钮）
-    method: str = "一键护理"
+    method: str = "ocr检测"
     # 体力阈值：低于则喂食到达标
     energy_threshold: int = 60
     # 清洁阈值：低于则洗澡到达标
@@ -196,7 +196,7 @@ class HireFriendConfig:
 
 # 任务队列调度的任务键（tasks.order 里可配置的任务名）
 TASK_KEYS = ('care', 'adventure', 'visit', 'pk', 'hire_friend', 'friend_care',
-             'school', 'work')
+             'school', 'work', 'svip')
 # 主任务组：冒险/学习/打工/雇佣好友互斥（共用"出门-进行中"一条线，不能同时做），
 # 由 TaskQueueRunner 按 tasks.main_order 统一调度
 MAIN_TASK_KEYS = ('adventure', 'school', 'hire_friend', 'work')
@@ -220,7 +220,7 @@ class TaskItemConfig:
 @dataclass
 class TasksConfig:
     # 执行顺序（> 分隔，越靠前越优先）；不在 order 里的任务不调度
-    order: str = "care>school>friend_care>hire_friend>adventure>visit>pk>work"
+    order: str = "svip>care>school>friend_care>hire_friend>adventure>visit>pk>work"
     # 主任务组（冒险/学习/打工/雇佣好友，互斥）组内优先级（> 分隔，越靠前越优先）；
     # 没列出的主任务按默认顺序兜底排最后
     main_order: str = "school>hire_friend>adventure>work"
@@ -235,6 +235,9 @@ class TasksConfig:
     friend_care: TaskItemConfig = field(default_factory=TaskItemConfig)
     school: TaskItemConfig = field(default_factory=TaskItemConfig)
     work: TaskItemConfig = field(default_factory=TaskItemConfig)
+    # 每日领取 QQ SVIP 会员礼包（默认每日时间点触发一次）
+    svip: TaskItemConfig = field(default_factory=lambda: TaskItemConfig(
+        trigger="daily", daily_times=["09:05"], success_interval=60))
 
 
 @dataclass
@@ -246,7 +249,7 @@ class RunnerConfig:
 @dataclass
 class RecoverConfig:
     # 异常恢复方式：重启设备（adb reboot，彻底）/ 重启游戏（只强停并重开 QQ，快）
-    method: str = "重启设备"
+    method: str = "重启游戏"
 
 
 

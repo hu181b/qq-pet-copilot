@@ -1,5 +1,6 @@
 """Free money bags: semantic home control and image-verified friend row badges."""
 from functools import lru_cache
+import re
 import time
 
 import cv2
@@ -78,9 +79,17 @@ def friend_bag_points(screen, visit_bounds):
     return hits
 
 
+def parse_coins(text: str) -> int:
+    """从结果 content-desc 里推算金币数：取其中最大的数字
+    （形如"成长福袋获得xxx金币"）。解析不出返回 0（不瞎猜）。"""
+    nums = [int(n) for n in re.findall(r'\d+', (text or '').replace(',', ''))]
+    return max(nums) if nums else 0
+
+
 class MoneyBagCollector:
     def __init__(self, dev):
         self.dev = dev
+        self.coins = 0  # 本轮巡检累计领到的金币（run 开始时清零）
 
     @staticmethod
     def elements(source, xpath):
@@ -114,6 +123,7 @@ class MoneyBagCollector:
             if self.elements(self.dev.hierarchy(), SUMMARY):
                 raise RuntimeError('成长福袋结果页尚未关闭，暂停本轮领取')
             log(f'成长福袋：已处理结果（{text}）')
+            self.coins += parse_coins(text)
             return text
         if friend:
             source = self.dev.hierarchy()
@@ -161,6 +171,7 @@ class MoneyBagCollector:
 
     def run(self, max_pages=32, max_clicks=12):
         """A bounded sweep; caller keeps activity settlement ahead of this work."""
+        self.coins = 0
         deadline = time.monotonic() + MAX_SECONDS
         source = self.dev.hierarchy()
         visits = self.elements(source, VISITS)

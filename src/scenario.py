@@ -26,6 +26,8 @@ LEAVE_HOME_ATTEMPTS = 3    # 点击出门失败（点完 main_sign 仍在主页�
 WAIT_LOG_INTERVAL = 300.0  # 长等待期间的心跳日志间隔（秒），避免每轮检测刷屏
 ENCOURAGE_LOG_INTERVAL = 300.0  # "鼓励宠物"点击日志节流间隔（秒）：按钮每 ~12s 出现，避免刷屏
 EMPLOYED_MAX_WAIT_MINUTES = 45  # 被雇佣"等到25/75（小于45min）"：面板剩余时间超过该值立即召回
+EMPLOYED_GONE_ATTEMPTS = 4     # 等召回时连续多少轮看不到"被雇佣中"面板就认为雇佣已自然结束
+# （真机 bug：雇佣自己到期回主页后，原循环只认"召回条件满足"一个出口，会永远卡死）
 DEFER_DETECTION_ATTEMPTS = 3    # 延时收尾模式判定进行中/结束状态的检测次数
 DEFER_FALLBACK_SECONDS = 15     # OCR 识别不到剩余时间时的兜底重估间隔（秒）：
 # 原本 60s 会让一开始的收尾预估多等近 1 分钟（用户实测收尾偏晚），
@@ -444,6 +446,7 @@ class DeviceScenario:
         if check_interval is None:
             check_interval = self.check_interval
         last_log_at = 0.0
+        gone_rounds = 0  # 连续未见"被雇佣中"面板的轮数
         while True:
             # 本循环全是 OCR 定位（剩余时间/分成比例/被雇佣中），
             # 不需要控件树快照（dump 一次 1~4s），只截图即可
@@ -453,7 +456,17 @@ class DeviceScenario:
             # 点击一次被雇佣画面防止设备休眠
             cur = self.see('employed_in', screen)
             if cur:
+                gone_rounds = 0
                 self.dev.click(cur[0], cur[1])  # 防休眠点击不记日志
+            else:
+                # 面板连续多轮消失：雇佣可能已自然到期（结算回主页）。
+                # 原实现只有"召回条件满足"一个出口，雇佣自然结束后这里会
+                # 无限空转、整个调度器卡死（真机踩过）。
+                gone_rounds += 1
+                if gone_rounds >= EMPLOYED_GONE_ATTEMPTS:
+                    log('被雇佣状态已自然结束（找不到被雇佣面板），返回主页面')
+                    self.ensure_main_page()
+                    return
             now = time.monotonic()
             if now - last_log_at >= WAIT_LOG_INTERVAL:
                 log('仍在被雇佣中...')

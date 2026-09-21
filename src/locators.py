@@ -298,6 +298,26 @@ LOCATORS: dict[str, dict] = {
     'shower_10': {
         'xpath': ['//*[@content-desc="香皂片" or starts-with(@content-desc, "香皂片，剩余")]'],
     },
+
+    # ---- 每日领取 QQ SVIP 会员礼包 ----
+    # 主页宠物状态卡右侧图标列第二个（企鹅帽）。"点击有礼"小标签只在部分时候
+    # 渲染，不能只靠 OCR：模板匹配兜底（resources/svip-entry.png，
+    # 见 scenarios/svip.py 的 find_entry_icon），分辨率无关，不写死坐标。
+    'svip_entry': {
+        'xpath': ['//*[@content-desc="点击有礼"]'],
+        'ocr': ['点击有礼'],
+    },
+    # 礼包弹窗标题（"QQ SVIP专属礼包"；OCR 空格归一化后按子串匹配）
+    'svip_dialog': {'ocr': ['SVIP专属礼包']},
+    # 会员且今日未领：点帽图标即直接发放，弹"恭喜获得SVIP专属礼包"奖励页
+    #（真机实测：没有"立即领取"按钮，奖励页提示"点击空白处关闭"）
+    'svip_reward': {'ocr': ['恭喜获得SVIP专属礼包', '恭喜获得']},
+    # 会员且今日已领：按钮变为"明日再来"
+    'svip_tomorrow': {'ocr': ['明日再来']},
+    # 非会员：按钮为"开通 SVIP"（命中即代表账号无 SVIP，任务自动关闭并写回配置）
+    'svip_open': {'ocr': ['开通SVIP']},
+    # 礼包弹窗的小关闭按钮（兜底；主路径用系统返回键关弹窗）
+    'svip_close': {'xpath': ['//*[@content-desc="关闭"]']},
 }
 
 def see(

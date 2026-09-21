@@ -38,7 +38,7 @@ DEFAULTS = {
     'schedule.encourage_times': 10,
     'adventure.times_per_day': 1,
     'adventure.start_time': '08:00',
-    'adventure.skip_bad_weather': False,
+    'adventure.skip_bad_weather': True,
     'adventure.batch': 12,
     'visit.times_per_day': 10,
     'visit.start_time': '00:01',
@@ -55,14 +55,14 @@ DEFAULTS = {
     'hire_friend.friend_name': '',
     'hire_friend.times_per_day': 8,
     'runner.engine': 'task_queue',
-    'tasks.order': 'care>school>friend_care>hire_friend>adventure>visit>pk>work',
+    'tasks.order': 'svip>care>school>friend_care>hire_friend>adventure>visit>pk>work',
     'tasks.main_order': 'school>hire_friend>adventure>work',
     'tasks.failure_interval': 1800,
     'care.energy_threshold': 60,
     'care.clean_threshold': 60,
-    'care.method': '一键护理',
+    'care.method': 'ocr检测',
     'care.interval_seconds': 60,
-    'work.duration': '45分钟',
+    'work.duration': '10分钟',
     'employed.enabled': False,
     'employed.time_range': '19:31-23:59',
     'employed.interval_seconds': 60,
@@ -207,3 +207,34 @@ def set_value(data, dotted_key: str, value) -> None:
             cur[part] = {}
         cur = cur[part]
     cur[parts[-1]] = value
+
+
+# 版本升级时新增的任务键：老配置的 tasks.order 里没有，启动时自动追加到队尾。
+# 只在进程启动时迁移一次（GUI 主进程 + 调度器子进程各一次）；
+# 用户此后手动从 order 删掉的键不会再被加回来。以后新增任务时扩充这个元组。
+NEW_TASK_KEYS = ('svip',)
+
+
+def migrate_tasks_order() -> None:
+    """老配置的 tasks.order 缺少新任务键时，插入到队首并写回（保留注释）。
+
+    新任务（如 svip）是每天只跑一次的轻量任务，放最前=最高优先：
+    到点后调度器下一轮就先执行它，不用等前面长任务排队。
+    """
+    from src.progress import log
+
+    try:
+        data = load_raw()
+        order = str(get_value(data, 'tasks.order') or '').strip()
+        if not order:
+            return  # 空 order 由调度器按全部任务键兜底，不需要迁移
+        keys = [k.strip() for k in order.split('>') if k.strip()]
+        missing = [k for k in NEW_TASK_KEYS if k not in keys]
+        if not missing:
+            return
+        set_value(data, 'tasks.order', '>'.join(missing + keys))
+        save_raw(data)
+        log(f'tasks.order 缺少新任务 {"/".join(missing)}，已插入到队首'
+            f'（重排顺序请到任务选项卡修改）')
+    except Exception as e:  # noqa: BLE001 - 迁移失败不阻断启动
+        log(f'tasks.order 迁移失败（{e}），请手动在任务选项卡把新任务加进执行顺序')

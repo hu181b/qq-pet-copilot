@@ -22,6 +22,7 @@ VISIT_PROGRESS_FILE = PROJECT_ROOT / 'runs' / 'visit_progress.json'
 PK_PROGRESS_FILE = PROJECT_ROOT / 'runs' / 'pk_progress.json'
 HIRE_FRIEND_PROGRESS_FILE = PROJECT_ROOT / 'runs' / 'hire_friend_progress.json'
 EXP_DAILY_PROGRESS_FILE = PROJECT_ROOT / 'runs' / 'exp_daily_progress.json'
+SVIP_PROGRESS_FILE = PROJECT_ROOT / 'runs' / 'svip_progress.json'
 
 
 def log(msg: str) -> None:
@@ -120,6 +121,123 @@ def log_exp_daily() -> None:
         line += '（历史: ' + '，'.join(f'{d} ' + ('完成' if v else '未完成')
                                       for d, v in past.items()) + '）'
     log(line)
+
+
+# ---- 每日领取 QQ SVIP 会员礼包（布尔位：当天是否已领取） ----
+
+
+def load_svip_claim(quiet: bool = False) -> tuple[str, bool, dict]:
+    """读取 SVIP 礼包进度，返回 (今天日期, 当日是否已领取, 历史记录 {日期: 是否领取})。"""
+    today, done, history = progress_store.load_exp_daily(SVIP_PROGRESS_FILE)
+    if not quiet:
+        log('SVIP礼包: ' + ('今天已领取' if done else '今天未领取'))
+    return today, done, history
+
+
+def save_svip_claim(done: bool, today: str | None = None, history: dict | None = None) -> None:
+    """持久化当天 SVIP 礼包是否已领取（跨天由 progress_store 规整，隔天自动失效）。"""
+    progress_store.save_exp_daily(SVIP_PROGRESS_FILE, done, today, history)
+
+
+def svip_claimed_today() -> bool:
+    """今天 SVIP 礼包是否已领取（供调度判断当天是否还需要执行）。"""
+    _, done, _ = load_svip_claim(quiet=True)
+    return done
+
+
+def set_svip_nonmember(flag: bool) -> None:
+    """记录"任务因非会员被自动关闭"标记（供调度器每日复查会员是否恢复）。"""
+    data = progress_store.read_raw(SVIP_PROGRESS_FILE)
+    data['non_member'] = bool(flag)
+    data['marked_at'] = time.strftime('%Y-%m-%d %H:%M:%S') if flag else ''
+    progress_store.write_raw(SVIP_PROGRESS_FILE, data)
+
+
+def svip_nonmember_flag() -> bool:
+    """当前是否处于"非会员自动关闭"状态（关闭期间调度器每日探测一次）。"""
+    return bool(progress_store.read_raw(SVIP_PROGRESS_FILE).get('non_member'))
+
+
+def reset_daily_progress_for_pet(pet_name: str) -> list[str]:
+    """换宠物/账号（OCR 识别的宠物名变化）后清空所有每日任务进度。
+
+    保留历史记录，仅当天计数清零；经验日常/SVIP 领取状态一并重置。
+    返回有计数被清掉的任务名（供日志说明）。
+    """
+    today = date.today().isoformat()
+    reset: list[str] = []
+    for name, file in (('学习', SCHOOL_PROGRESS_FILE),
+                       ('打工', WORK_PROGRESS_FILE),
+                       ('冒险', ADVENTURE_PROGRESS_FILE),
+                       ('被雇佣', EMPLOYED_PROGRESS_FILE),
+                       ('踩踩', VISIT_PROGRESS_FILE),
+                       ('PK', PK_PROGRESS_FILE),
+                       ('雇佣好友', HIRE_FRIEND_PROGRESS_FILE)):
+        _, done, history = progress_store.load_daily(file)
+        if done:
+            progress_store.save_daily(file, today, 0, history)
+            reset.append(name)
+    _, exp_done, exp_history = load_exp_daily(quiet=True)
+    if exp_done:
+        save_exp_daily(False, today, exp_history)
+        reset.append('经验日常')
+    _, svip_done, svip_history = load_svip_claim(quiet=True)
+    if svip_done:
+        save_svip_claim(False, today, svip_history)
+        reset.append('SVIP礼包')
+    if reset:
+        log(f'宠物名变为 {pet_name}，已重置每日任务进度: {"/".join(reset)}')
+    return reset
+
+
+# ---- 成长福袋累计金币（跨天累计；换账号/配置变更后清零重计） ----
+
+MONEYBAG_STATS_FILE = PROJECT_ROOT / 'runs' / 'moneybag_stats.json'
+
+
+def _moneybag_config_sig() -> str:
+    """config.yaml 指纹（修改时间 + 大小）：配置文件一变，福袋累计清零重计。"""
+    try:
+        st = (PROJECT_ROOT / 'config.yaml').stat()
+        return f'{st.st_mtime_ns}-{st.st_size}'
+    except OSError:
+        return ''
+
+
+def add_moneybag_coins(coins: int, bags: int = 1, pet_name: str | None = None) -> dict:
+    """累加一次福袋领取的金币/个数并落盘，返回更新后的累计。
+
+    清零条件（满足其一）：config.yaml 变更；宠物名与上次记录不同（换账号）。
+    宠物名从未识别出来时不影响累计（不当作换账号）。
+    """
+    data = progress_store.read_raw(MONEYBAG_STATS_FILE)
+    sig = _moneybag_config_sig()
+    name = str(pet_name or '').strip()
+    prev_name = str(data.get('pet_name') or '').strip()
+    if data.get('config_sig') != sig or (name and prev_name and name != prev_name):
+        data = {}  # 换账号或配置变更：清零重计
+    new = {
+        'pet_name': name or prev_name,
+        'config_sig': sig,
+        'coins': progress_store.to_int(data.get('coins', 0)) + int(coins or 0),
+        'bags': progress_store.to_int(data.get('bags', 0)) + max(1, int(bags or 1)),
+        'updated': time.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    progress_store.write_raw(MONEYBAG_STATS_FILE, new)
+    if new['coins']:
+        log(f'福袋累计: 本次 +{coins} 金币，共 {new["coins"]} 金币'
+            f'（{new["bags"]} 个，宠物 {new["pet_name"] or "未识别"}）')
+    return new
+
+
+def load_moneybag_stats() -> dict:
+    """读取福袋累计（供 GUI 今日统计显示）。"""
+    data = progress_store.read_raw(MONEYBAG_STATS_FILE)
+    return {
+        'pet_name': str(data.get('pet_name') or ''),
+        'coins': progress_store.to_int(data.get('coins', 0)),
+        'bags': progress_store.to_int(data.get('bags', 0)),
+    }
 
 
 # 活动类型 -> (进度文件, 中文量词, 计数名)，用于出门时等完别的活动后的交叉计数

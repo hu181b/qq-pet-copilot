@@ -11,6 +11,7 @@ EXE_NAME = 'QQPetCopilot'
 _required = [
     'resources/app-icon.ico',
     'resources/moneybag-friend.png',
+    'resources/svip-entry.png',
     'resources/scrcpy-win64/scrcpy.exe',
     'resources/scrcpy-win64/adb.exe',
     'resources/scrcpy-win64/AdbWinApi.dll',
@@ -27,6 +28,7 @@ if _missing:
 datas = [('config.example.yaml', '.')]
 datas.append(('resources/app-icon.ico', 'resources'))
 datas.append(('resources/moneybag-friend.png', 'resources'))
+datas.append(('resources/svip-entry.png', 'resources'))
 # resources/scrcpy-win64/ 不入库（tools/fetch_scrcpy.py 拉取），存在才随包带上
 if Path('resources/scrcpy-win64/scrcpy.exe').is_file():
     datas.append(('resources/scrcpy-win64', 'resources/scrcpy-win64'))

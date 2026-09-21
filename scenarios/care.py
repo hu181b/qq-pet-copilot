@@ -26,7 +26,7 @@ import numpy as np
 
 from src.locators import see_bounds
 from src.ocr import ocr_texts
-from src.progress import log
+from src.progress import log, reset_daily_progress_for_pet
 from src.scenario import CLICK_INTERVAL, DeviceScenario
 from src.status_cache import clear_status_fields, update_status
 from src.u2dev import REF_SIZE
@@ -526,8 +526,18 @@ class CareScenario(DeviceScenario):
         log(f'宠物状态: 体力={status.get("体力")} '
             f'清洁={status.get("清洁")} 心情={status.get("心情")} '
             f'账号名称={status.get("账号名称")} 宠物名称={status.get("宠物名称")}')
-        # 写状态缓存（GUI 日志页顶部状态条显示；已取消多账号区分，固定 default 条目）
+        # 写状态缓存（GUI 日志页顶部状态条显示；已取消多账号区分，固定 default 条目）；
+        # 写之前检测宠物名变化：换了宠物/账号就把每日任务进度清零重计
+        try:
+            from src.status_cache import load_accounts
+            old_name = str((load_accounts().get('default') or {}).get('pet_name') or '').strip()
+        except Exception:
+            old_name = ''
+        new_name = str(status.get('宠物名称') or '').strip()
+        if new_name and old_name and new_name != old_name:
+            reset_daily_progress_for_pet(new_name)
         update_status(None,
+                      account_name=status.get('账号名称'),
                       pet_name=status.get('宠物名称'),
                       energy=status.get('体力'),
                       clean=status.get('清洁'),

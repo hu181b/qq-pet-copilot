@@ -7,7 +7,7 @@ adb 路径自动定位（配置路径 -> PATH -> 常见安装目录），设备�
     .venv/Scripts/python tools/adb_screenshot.py                  # 抓一张到 screenshots/screen_YYYYmmdd_HHMMSS_mmm.png
     .venv/Scripts/python tools/adb_screenshot.py --name main      # 自定义文件名（自动补时间戳后缀）
     .venv/Scripts/python tools/adb_screenshot.py --count 5 --interval 1   # 连拍 5 张，间隔 1 秒（抓动画/多帧状态）
-    .venv/Scripts/python tools/adb_screenshot.py --out tmp --serial ba286ada  # 指定目录/设备
+    .venv/Scripts/python tools/adb_screenshot.py --out tmp --serial ABCD1234  # 指定目录/设备
     .venv/Scripts/python tools/adb_screenshot.py --list           # 列出在线设备
 
 说明：走 `adb exec-out screencap -p` 直接拿 PNG 字节（比 shell 重定向 + pull 稳），

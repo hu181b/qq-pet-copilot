@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
@@ -128,9 +128,15 @@ class FullRegression(unittest.TestCase):
         import main
         window=NS(btn_scrcpy=Mock(), isActiveWindow=Mock(return_value=False),
                   isMinimized=Mock(return_value=False), _background_mirror_paused=False,
+                  _bg_ticks=0,
+                  _runner_proc=NS(poll=lambda: None),  # 调度器在跑，看门狗才工作
                   _disable_scrcpy=Mock(), _enable_scrcpy=Mock())
         window.btn_scrcpy.isChecked.return_value=True
-        main.MainWindow._check_scrcpy(window)
+        # 防抖：单次或不足 SCRCPY_THROTTLE_TICKS 轮的"后台"判定不触发暂停，
+        # 只有连续 SCRCPY_THROTTLE_TICKS 轮都判后台才真正暂停一次。
+        for _ in range(main.SCRCPY_THROTTLE_TICKS - 1):
+            main.MainWindow._check_scrcpy(window)
+        window._disable_scrcpy.assert_not_called()
         main.MainWindow._check_scrcpy(window)
         window._disable_scrcpy.assert_called_once()
         window._enable_scrcpy.assert_not_called()
@@ -146,6 +152,122 @@ class FullRegression(unittest.TestCase):
         window.btn_scrcpy.isChecked.return_value=False
         main.MainWindow._check_scrcpy(window)
         window._enable_scrcpy.assert_not_called()
+
+    def test_scrcpy_watchdog_runs_before_start(self):
+        # 看门狗不依赖"开始"：未跑调度器时也维护镜像（用户可能只想要画面）
+        import main
+        window = NS(btn_scrcpy=Mock(), _runner_proc=None,
+                    _background_mirror_paused=False, _bg_ticks=0,
+                    _scrcpy_retry_at=0.0, _scrcpy_proc=None,
+                    _embed_tries=0, _embed_fail_logged=False,
+                    _embed_timer=NS(isActive=lambda: False, start=Mock()),
+                    scrcpy_view=Mock(),
+                    isActiveWindow=Mock(return_value=True),
+                    isMinimized=Mock(return_value=False),
+                    _disable_scrcpy=Mock(), _enable_scrcpy=Mock())
+        window.btn_scrcpy.isChecked.return_value = True
+        # scrcpy.exe 是构建期才下载的第三方二进制（.gitignore 排除，不入库），
+        # 用例里用临时文件顶替，否则干净检出（没有该目录）时必然失败。
+        with tempfile.TemporaryDirectory() as folder:
+            fake_scrcpy = Path(folder) / 'scrcpy.exe'
+            fake_scrcpy.touch()
+            with patch.object(main, 'SCRCPY', fake_scrcpy), \
+                 patch('main.start_scrcpy', return_value=Mock()) as start:
+                main.MainWindow._check_scrcpy(window)
+        start.assert_called_once()
+
+    def test_svip_entry_template_match(self):
+        # 入口用模板匹配（同福袋套路：归一 1080 宽 + ROI 内多尺寸 matchTemplate），
+        # 不写死像素坐标；合成一张贴图验证能命中且位置正确
+        import cv2
+        from scenarios.svip import find_entry_icon
+        from src.config import resource_path
+        tpl = cv2.imdecode(
+            np.fromfile(resource_path('resources/svip-entry.png'), dtype=np.uint8),
+            cv2.IMREAD_GRAYSCALE)
+        screen = np.full((1200, 1080, 3), 240, dtype=np.uint8)
+        size = 70
+        tx, ty = 900, 300  # 完整落在右侧图标列 ROI（x 880~1040, y 200~560）内
+        screen[ty:ty + size, tx:tx + size] = cv2.cvtColor(
+            cv2.resize(tpl, (size, size)), cv2.COLOR_GRAY2RGB)
+        hit = find_entry_icon(screen)
+        self.assertIsNotNone(hit)
+        cx, cy, score = hit
+        self.assertGreater(score, 0.90)
+        self.assertLess(abs(cx - (tx + size // 2)), 10)
+        self.assertLess(abs(cy - (ty + size // 2)), 10)
+        # 空白屏不应命中
+        self.assertIsNone(find_entry_icon(np.full((1200, 1080, 3), 240, dtype=np.uint8)))
+
+    def test_moneybag_coins_accumulate_and_reset(self):
+        # 福袋金币累计：同账号累加；换账号/配置变更清零重计
+        import src.progress as prog
+        from src.moneybag import parse_coins
+        self.assertEqual(parse_coins('成长福袋获得120金币'), 120)
+        self.assertEqual(parse_coins('获得 1,000 金币'), 1000)
+        self.assertEqual(parse_coins('没有数字'), 0)
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / 'moneybag_stats.json'
+            with patch.object(prog, 'MONEYBAG_STATS_FILE', f), \
+                 patch.object(prog, '_moneybag_config_sig', return_value='sig-1'):
+                prog.add_moneybag_coins(50, pet_name='A')
+                st = prog.add_moneybag_coins(70, pet_name='A')
+                self.assertEqual(st['coins'], 120)
+                self.assertEqual(st['bags'], 2)
+                self.assertEqual(prog.load_moneybag_stats()['coins'], 120)
+                st = prog.add_moneybag_coins(10, pet_name='B')  # 换账号 -> 清零
+                self.assertEqual(st['coins'], 10)
+                self.assertEqual(st['pet_name'], 'B')
+            with patch.object(prog, 'MONEYBAG_STATS_FILE', f), \
+                 patch.object(prog, '_moneybag_config_sig', return_value='sig-2'):
+                st = prog.add_moneybag_coins(5, pet_name='B')  # 配置变更 -> 清零
+                self.assertEqual(st['coins'], 5)
+
+
+    def test_disable_scrcpy_hands_off_before_killing_mirror(self):
+        import main
+        # 切后台（permanent=False）：镜像常驻不杀、只藏窗口，不启动无头关屏。
+        # scrcpy 被杀才是闪屏根因；常驻后切换时屏幕状态不变。
+        window = NS(_screen_off_proc=None,
+                    _scrcpy_proc=Mock(),
+                    _embed_timer=Mock(),
+                    scrcpy_view=Mock())
+        with patch('main.start_scrcpy_screen_off') as ss_off, \
+             patch('main.kill_our_scrcpy') as kill:
+            main.MainWindow._disable_scrcpy(window, permanent=False)
+        ss_off.assert_not_called()
+        kill.assert_not_called()
+        window.scrcpy_view.unembed.assert_called_once()
+        # 手动关镜像开关（permanent=True）：杀镜像 + 启用无头关屏。
+        screen_off = Mock(); screen_off.poll.return_value = None
+        window2 = NS(_screen_off_proc=None,
+                     _scrcpy_proc=Mock(),
+                     _embed_timer=Mock(),
+                     scrcpy_view=Mock())
+        with patch('main.start_scrcpy_screen_off', return_value=screen_off) as ss_off, \
+             patch('main.kill_our_scrcpy') as kill, \
+             patch('main.time.sleep') as _sleep:
+            main.MainWindow._disable_scrcpy(window2, permanent=True)
+        ss_off.assert_called_once()
+        kill.assert_called_once()
+        self.assertIs(window2._screen_off_proc, screen_off)
+
+    def test_enable_scrcpy_keeps_screen_off_if_mirror_fails(self):
+        import main
+        # 镜像没拉起来时不能把无头关屏进程收掉，否则屏幕被放亮。
+        screen_off = Mock(); screen_off.poll.return_value = None
+        window = NS(_background_mirror_paused=False,
+                    _scrcpy_proc=None,
+                    _screen_off_proc=screen_off,
+                    _embed_tries=0, _embed_fail_logged=False,
+                    _embed_timer=Mock(),
+                    scrcpy_view=Mock())
+        with patch('main.start_scrcpy', return_value=None) as ss, \
+             patch('main.time.sleep') as _sleep:
+            main.MainWindow._enable_scrcpy(window)
+        ss.assert_called_once()
+        screen_off.terminate.assert_not_called()
+        self.assertIs(window._screen_off_proc, screen_off)
 
     def test_background_skips_stats_file_reads(self):
         import main
@@ -264,6 +386,228 @@ class FullRegression(unittest.TestCase):
                 self.assertEqual(sc.step_once(),'already' if done else 'stepped')
             self.assertEqual(sc.click.call_count,int(not done))
 
+    # ---- SVIP 礼包（每日领取；非会员自动关任务） ----
+
+    @staticmethod
+    def _svip_scenario(states):
+        """构造裸 SvipScenario：see 按 states 字典应答，设备交互全部 Mock。"""
+        from scenarios.svip import SvipScenario
+        sc = SvipScenario.__new__(SvipScenario)
+        sc.click = Mock()
+        sc.screen = Mock(return_value=object())
+        sc.see = lambda key, *a, **kw: states.get(key)
+        sc.ensure_main_page = Mock()
+        sc._close_dialog = Mock()
+        return sc
+
+    def test_svip_claim_success(self):
+        # 会员且今日未领：点"立即领取" -> 记进度 -> 返回 True
+        sc = self._svip_scenario({'svip_entry': (10, 20, 1),
+                                  'svip_dialog': (100, 200, 1),
+                                  'svip_claim': (100, 300, 1)})
+        with patch('scenarios.svip.time.sleep'), \
+             patch('scenarios.svip.svip_claimed_today', return_value=False), \
+             patch('scenarios.svip.save_svip_claim') as save:
+            self.assertTrue(sc.run())
+        save.assert_called_once_with(True)
+        self.assertGreaterEqual(sc.click.call_count, 2)  # 入口 + 领取按钮
+        sc.ensure_main_page.assert_called()
+
+    def test_svip_already_claimed_today_skips(self):
+        # 进度文件已标记今天领取：直接跳过，不碰设备
+        from scenarios.svip import SvipScenario
+        sc = SvipScenario.__new__(SvipScenario)
+        sc.ensure_main_page = Mock()
+        with patch('scenarios.svip.svip_claimed_today', return_value=True), \
+             patch('scenarios.svip.save_svip_claim') as save:
+            self.assertFalse(sc.run())
+        save.assert_not_called()
+        sc.ensure_main_page.assert_not_called()
+
+    def test_svip_tomorrow_dialog_marks_done(self):
+        # 弹窗按钮是"明日再来"：说明今天已领过，记进度并返回 False
+        sc = self._svip_scenario({'svip_entry': (10, 20, 1),
+                                  'svip_dialog': (100, 200, 1),
+                                  'svip_tomorrow': (100, 300, 1)})
+        with patch('scenarios.svip.time.sleep'), \
+             patch('scenarios.svip.svip_claimed_today', return_value=False), \
+             patch('scenarios.svip.save_svip_claim') as save:
+            self.assertFalse(sc.run())
+        save.assert_called_once_with(True)
+        sc.click.assert_called_once()  # 只点了入口，没点领取
+
+    def test_svip_non_member_disables_task(self):
+        # 非会员：弹窗按钮是"开通 SVIP" -> 自动关闭任务并返回 False，不记领取进度
+        sc = self._svip_scenario({'svip_entry': (10, 20, 1),
+                                  'svip_dialog': (100, 200, 1),
+                                  'svip_open': (100, 300, 1)})
+        with patch('scenarios.svip.time.sleep'), \
+             patch('scenarios.svip.svip_claimed_today', return_value=False), \
+             patch('scenarios.svip.save_svip_claim') as save, \
+             patch('scenarios.svip.SvipScenario._disable_task') as disable:
+            self.assertFalse(sc.run())
+        disable.assert_called_once()
+        save.assert_not_called()
+
+    def test_svip_reward_popup_means_claimed(self):
+        # 真机 bug 回归：会员未领取时点帽图标是"直接发奖"并弹"恭喜获得"奖励页
+        # （没有"立即领取"按钮），必须判定为领取成功并记进度
+        sc = self._svip_scenario({'svip_entry': (10, 20, 1),
+                                  'svip_dialog': (100, 200, 1),
+                                  'svip_reward': (100, 300, 1)})
+        with patch('scenarios.svip.save_svip_claim') as save, \
+             patch.object(sc, '_close_dialog') as close:
+            self.assertTrue(sc._claim_once())
+        save.assert_called_once_with(True)
+        close.assert_called_once()
+
+    def test_svip_probe_membership_reward_is_member(self):
+        # 探测时撞上"刚领到"的奖励页 -> 也是会员，并顺手记当天已领
+        sc = self._svip_scenario({})
+        sc._open_and_read_state = Mock(return_value=('reward', object()))
+        with patch('scenarios.svip.save_svip_claim') as save:
+            self.assertTrue(sc.probe_membership())
+        save.assert_called_once_with(True)
+
+    def test_svip_disable_task_writes_config(self):
+        # _disable_task 把 tasks.svip.enabled=false 写回 config.yaml，并打非会员标记
+        from scenarios.svip import SvipScenario
+        data = {'tasks': {'svip': {'enabled': True}}}
+        with patch('src.settings.load_raw', return_value=data), \
+             patch('src.settings.save_raw') as save_raw, \
+             patch('scenarios.svip.set_svip_nonmember') as mark:
+            SvipScenario._disable_task()
+        save_raw.assert_called_once()
+        self.assertFalse(data['tasks']['svip']['enabled'])
+        mark.assert_called_once_with(True)
+
+    def test_svip_probe_membership_states(self):
+        # 会员探测：明日再来/立即领取 -> True（顺手记领取进度）；开通 SVIP -> False
+        sc = self._svip_scenario({'svip_entry': (10, 20, 1),
+                                  'svip_dialog': (100, 200, 1),
+                                  'svip_tomorrow': (100, 300, 1)})
+        sc._open_and_read_state = Mock(return_value=('tomorrow', object()))
+        with patch('scenarios.svip.save_svip_claim') as save:
+            self.assertTrue(sc.probe_membership())
+        save.assert_called_once_with(True)
+        sc._open_and_read_state = Mock(return_value=('open', object()))
+        self.assertFalse(sc.probe_membership())
+        sc._open_and_read_state = Mock(return_value=(None, object()))
+        self.assertIsNone(sc.probe_membership())  # 识别不了不当成状态变化
+
+    def test_svip_recheck_reopens_task_for_member(self):
+        # 非会员自动关闭期间：每天探测一次，恢复会员 -> 自动写回 enabled=true
+        from datetime import time as dtime
+        from scenarios.runner import TaskQueueRunner, _QueueTask
+        runner = TaskQueueRunner.__new__(TaskQueueRunner)
+        runner.svip = Mock()
+        runner.svip.probe_membership.return_value = True
+        runner._latest_daily_time = Mock(return_value=dtime(9, 5))
+        task = _QueueTask('svip')
+        task.cfg.enabled = False
+        data = {'tasks': {'svip': {'enabled': False}}}
+        with patch('scenarios.runner.svip_nonmember_flag', return_value=True), \
+             patch('src.settings.load_raw', return_value=data), \
+             patch('src.settings.save_raw') as save_raw:
+            runner._svip_nonmember_recheck({'svip': task})
+            # 同一天不重复探测
+            runner._svip_nonmember_recheck({'svip': task})
+        self.assertEqual(runner.svip.probe_membership.call_count, 1)
+        save_raw.assert_called_once()
+        self.assertTrue(data['tasks']['svip']['enabled'])
+        # 手动关闭（无非会员标记）：不探测
+        with patch('scenarios.runner.svip_nonmember_flag', return_value=False), \
+             patch('src.settings.save_raw') as save_raw2:
+            runner._svip_nonmember_recheck({'svip': task})
+        save_raw2.assert_not_called()
+
+    def test_migrate_tasks_order_appends_new_keys(self):
+        # 老配置 tasks.order 缺 svip：启动迁移自动追加到队尾；已有则不写盘
+        from src import settings as settings_mod
+        data = {'tasks': {'order': 'care>work'}}
+        with patch.object(settings_mod, 'load_raw', return_value=data), \
+             patch.object(settings_mod, 'save_raw') as save_raw:
+            settings_mod.migrate_tasks_order()
+        save_raw.assert_called_once()
+        self.assertEqual(data['tasks']['order'], 'svip>care>work')
+        data2 = {'tasks': {'order': 'care>svip>work'}}
+        with patch.object(settings_mod, 'load_raw', return_value=data2), \
+             patch.object(settings_mod, 'save_raw') as save_raw2:
+            settings_mod.migrate_tasks_order()
+        save_raw2.assert_not_called()
+
+
+    def test_wait_employed_back_exits_when_employment_ends(self):
+        # 真机 bug 回归：雇佣自然到期回主页（面板消失）后，等待循环必须退出，
+        # 不能无限空转卡死整个调度器
+        from scenarios.employed import EmployedScenario
+        sc = EmployedScenario.__new__(EmployedScenario)
+        sc.dev = NS(click=lambda *a: None)
+        sc.screen = Mock(return_value=object())
+        sc.employed_recall_ready = Mock(return_value=False)
+        sc.ensure_main_page = Mock()
+        sc._recall_employed = Mock()
+        # 前两轮还能看到"被雇佣中"，之后连续消失 -> 应退出且不召回
+        states = [(10, 20, 1), (10, 20, 1), None, None, None, None]
+        sc.see = lambda key, screen=None, source=None: (
+            states.pop(0) if key == 'employed_in' else None)
+        with patch('src.scenario.time.sleep'):
+            sc.wait_employed_back(check_interval=0.01)
+        sc._recall_employed.assert_not_called()
+        sc.ensure_main_page.assert_called_once()
+
+    def test_wait_employed_back_recalls_when_ready(self):
+        # 召回条件满足：正常走召回，不受"面板消失"退出影响
+        from scenarios.employed import EmployedScenario
+        sc = EmployedScenario.__new__(EmployedScenario)
+        sc.dev = NS(click=lambda *a: None)
+        sc.screen = Mock(return_value=object())
+        sc.employed_recall_ready = Mock(return_value=True)
+        sc.see = Mock(return_value=(10, 20, 1))
+        sc._recall_employed = Mock()
+        sc.ensure_main_page = Mock()
+        with patch('src.scenario.time.sleep'):
+            sc.wait_employed_back(check_interval=0.01)
+        sc._recall_employed.assert_called_once()
+
+    def test_reset_daily_progress_for_pet(self):
+        # 换宠物：当天计数清零、历史保留；没有计数时不产生重复重置项
+        import src.progress as prog
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            files = {n: p / f'{n}.json' for n in
+                     ('school', 'work', 'adventure', 'employed',
+                      'visit', 'pk', 'hire_friend', 'exp', 'svip')}
+            consts = {'SCHOOL_PROGRESS_FILE': files['school'],
+                      'WORK_PROGRESS_FILE': files['work'],
+                      'ADVENTURE_PROGRESS_FILE': files['adventure'],
+                      'EMPLOYED_PROGRESS_FILE': files['employed'],
+                      'VISIT_PROGRESS_FILE': files['visit'],
+                      'PK_PROGRESS_FILE': files['pk'],
+                      'HIRE_FRIEND_PROGRESS_FILE': files['hire_friend'],
+                      'EXP_DAILY_PROGRESS_FILE': files['exp'],
+                      'SVIP_PROGRESS_FILE': files['svip']}
+            with patch.multiple(prog, **consts):
+                # 用真实当天日期：进度文件按天判定，写死日期会在跨天后失效
+                today_str = date.today().isoformat()
+                prog.save_progress(files['school'], today_str, 3, {'2026-09-18': 2})
+                prog.save_progress(files['visit'], today_str, 10, {})
+                prog.save_exp_daily(True, today_str, {})
+                prog.save_svip_claim(True, today_str, {})
+                reset = prog.reset_daily_progress_for_pet('咕咕嘎嘎')
+                self.assertIn('学习', reset)
+                self.assertIn('踩踩', reset)
+                self.assertIn('经验日常', reset)
+                self.assertIn('SVIP礼包', reset)
+                today, done, history = prog.load_progress(files['school'], quiet=True)
+                self.assertEqual(done, 0)
+                self.assertEqual(history.get('2026-09-18'), 2)  # 历史保留
+                self.assertEqual(prog.load_progress(files['visit'], quiet=True)[1], 0)
+                _, exp_done, _ = prog.load_exp_daily(quiet=True)
+                self.assertFalse(exp_done)
+                # 第二次调用：已无计数，不再列出
+                self.assertEqual(prog.reset_daily_progress_for_pet('咕咕嘎嘎'), [])
+
     def test_pk_round_cap(self):
         self.assertEqual(PKScenario._round_limit(15,14),15)
         self.assertEqual(PKScenario._round_limit(0,4),4+PK_ROUND_CAP)
@@ -306,7 +650,7 @@ class FullRegression(unittest.TestCase):
     def test_all_queue_task_gates(self):
         runner=TaskQueueRunner.__new__(TaskQueueRunner)
         now=datetime(2026,9,8,12)
-        for key in ('care','school','work','adventure','visit','pk','friend_care','hire_friend'):
+        for key in ('care','school','work','adventure','visit','pk','friend_care','hire_friend','svip'):
             task=_QueueTask(key)
             with self.subTest(task=key):
                 self.assertTrue(runner._eligible(task,now))
