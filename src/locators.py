@@ -123,7 +123,19 @@ LOCATORS: dict[str, dict] = {
         # 锚定"外层 RecyclerView -> FL[1] -> FL[1] -> 内层 RecyclerView[1] -> FL[1]"
         # 的卡片容器，不依赖 ckj 下会随 QQ 更新漂移的深层绝对路径（实测 2026-08-18
         # 打工面板实际是 ckj/.../FrameLayout[3]/RecyclerView[7]/...，旧路径全链失效）。
-        'xpath': [SELECT_BOX_XPATH],
+        'xpath': [
+            SELECT_BOX_XPATH,
+            # 学园 2026-09 的课程面板在内层 RecyclerView 前新增一层
+            # FrameLayout；仅在“去上课”按钮存在时匹配最近的课程列表。
+            '//*[@content-desc="去上课"]/preceding::'
+            'androidx.recyclerview.widget.RecyclerView[1]'
+            '/android.widget.FrameLayout[1]',
+            # 打工面板与学园一样多了一层布局；限定在“去打工”按钮前的
+            # 最近轮播列表，避免误用地图或好友列表的 RecyclerView。
+            '//*[@content-desc="去打工"]/preceding::'
+            'androidx.recyclerview.widget.RecyclerView[1]'
+            '/android.widget.FrameLayout[1]',
+        ],
     },
     # 2:2:1 分割：左 2/5 中心=1/5 宽，中 2/5 中心=3/5 宽，右 1/5 中心=9/10 宽
     'select_box_1': {'from_bounds': 'select_box_container', 'split': (1, 5)},
@@ -383,6 +395,11 @@ def locate_cached(name: str) -> tuple[int, int, float] | None:
     给需要"多个定位共享一次控件树 dump"的调用方判断缓存是否齐了用。
     """
     return _locate_cache.get(name)
+
+
+def invalidate_bounds_cache(name: str) -> None:
+    """页面切换后清除一个区域定位的旧坐标，下次从当前控件树确认。"""
+    _bounds_cache.pop(name, None)
 
 
 def see_bounds(dev: U2Device, name: str, source=None) -> tuple[int, int, int, int] | None:

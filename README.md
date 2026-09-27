@@ -1,12 +1,12 @@
 # QQ 宠物自动化助手（qq-pet-copilot）
 
-## v1.4 真机优化版
+## v1.41 真机优化版
 
 本仓库由 [hu181b](https://github.com/hu181b) 维护，基于原仓库 [490720818/qq-pet-copilot](https://github.com/490720818/qq-pet-copilot) 二次修改，保留原作者贡献和 GPL-3.0 许可证。
 
-从 [本仓库 Releases](https://github.com/hu181b/qq-pet-copilot/releases) 下载 `QQPetCopilot-v1.4-windows-x64.zip`，解压后双击 EXE，无需安装 Python，ADB、scrcpy 和 OCR 模型已内置。首次连接仍需手机开启并授权 USB 调试，登录 QQ 并进入宠物页面；请先检查任务设置再点击开始。
+从 [本仓库 Releases](https://github.com/hu181b/qq-pet-copilot/releases) 下载 `QQPetCopilot-v1.41-windows-x64.zip`，解压后双击 EXE，无需安装 Python，ADB、scrcpy 和 OCR 模型已内置。首次连接仍需手机开启并授权 USB 调试，登录 QQ 并进入宠物页面；请先检查任务设置再点击开始。
 
-v1.4 新增原子文件写入、调度与结算边界修复、配置提示框修复和程序图标。本版本移除模拟器支持，修复护理、打工和学园导航，减少后台 CPU、视频和磁盘开销，增加独立多配置、窗口缩放及关闭按钮最小化选项。完整说明见 [v1.4 优化与使用说明](RELEASE-v1.4.md)。下方上游功能介绍与本版本不一致时，以本段和版本说明为准。
+v1.4 新增原子文件写入、调度与结算边界修复、配置提示框修复和程序图标。本版本移除模拟器支持，修复护理、打工和学园导航，减少后台 CPU、视频和磁盘开销，增加独立多配置、窗口缩放及关闭按钮最小化选项。本次更新修复学园与打工卡片定位，并增加 GitHub 新版本自动提示。完整说明见 [v1.41 使用说明](RELEASE-v1.41.md)。下方上游功能介绍与本版本不一致时，以本段和版本说明为准。
 
 基于 uiautomator2 控件定位 + RapidOCR 文字识别的 QQ 宠物自动托管工具（分辨率无关）。
 PyQt6（Fluent Widgets）图形界面内嵌 scrcpy 实时画面，任务队列自动调度，按金币和**学习/工作时长**规则推进，

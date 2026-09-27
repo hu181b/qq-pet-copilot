@@ -860,6 +860,8 @@ class MainWindow(MSFluentWindow):
 
         # 检查更新：启动后自动查一次，之后每 6 小时一次；设置页可手动触发
         self._update_checking = False
+        self._notified_update_tags = set()
+        self._update_notice = None
         self._sig_update_result.connect(self._on_update_result)
         self._update_timer = QTimer(
             self, timeout=lambda: self._start_update_check(manual=False))
@@ -2106,6 +2108,32 @@ class MainWindow(MSFluentWindow):
                 log(result.message)
         if manual:
             self._show_update_result_dialog(result)
+        elif result.ok and result.has_update:
+            tag = result.latest_tag
+            if tag not in self._notified_update_tags:
+                if self._show_automatic_update_notice(result):
+                    self._notified_update_tags.add(tag)
+
+    def _show_automatic_update_notice(self, result) -> bool:
+        """Modeless notice: never interrupt scheduling or nest a modal event loop."""
+        if self._update_notice is not None:
+            return False
+        box = QMessageBox(self)
+        box.setWindowTitle('发现新版本')
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(f'发现 {result.latest_tag}，当前版本 v{result.current_version}。\n'
+                    '可打开发布页下载新版，完成当前任务后再更新。')
+        download = box.addButton('打开发布页', QMessageBox.ButtonRole.AcceptRole)
+        box.addButton('稍后', QMessageBox.ButtonRole.RejectRole)
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.buttonClicked.connect(lambda button: QDesktopServices.openUrl(
+            QUrl(result.release_url or APP_RELEASES_URL)) if button is download else None)
+        box.finished.connect(lambda _: setattr(self, '_update_notice', None))
+        self._update_notice = box
+        box.show()
+        return True
 
     def _show_update_result_dialog(self, result) -> None:
         """手动检查更新的结果弹窗 打开发布页/稍后 两个按钮，

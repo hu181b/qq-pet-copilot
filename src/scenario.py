@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timedelta
 
 from .config import find_adb, load_config
-from .locators import LOCATORS, ocr_screen
+from .locators import LOCATORS, invalidate_bounds_cache, ocr_screen
 from .locators import see as locate
 from .locators import see_all as locate_all
 from .ocr import parse_employed_ratio, parse_employed_remaining
@@ -260,17 +260,18 @@ class DeviceScenario:
         刚进面板时选择框可能还在加载，先重试等第一/三框都出现再归位，
         避免只查一次没查到就抛异常（页面加载慢/点进去还在转场）。
         """
+        # 学园/打工共享选择框缓存，但两个面板的纵坐标不同；每次进入面板
+        # 都从当前控件树重新确认一次，随后仍可在同一面板复用缓存。
+        invalidate_bounds_cache('select_box_container')
         first = third = None
-        source = None
         for attempt in range(1, 4):
-            # select_box_N 由容器 bounds 推导：容器 cache 后秒回，
-            # 未缓存时第一个 see 会 dump 一次并把容器 bounds 缓存，后续秒回
+            # 同一轮共享快照，下一轮必须重新读取，不能在旧控件树上等待加载。
+            if attempt > 1 or source is None:
+                source = self.dev.hierarchy()
             first = self.see('select_box_1', source=source)
             third = self.see('select_box_3', source=source)
             if first and third:
                 break
-            if source is None:
-                source = self.dev.hierarchy()  # 容器未命中：抓一次快照供推导
             if attempt == 1 or attempt == 3:
                 log(f'未定位到选择框，等待加载 ({attempt}/3)')
             time.sleep(CLICK_INTERVAL)
